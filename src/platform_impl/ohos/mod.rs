@@ -510,13 +510,28 @@ impl<T: 'static> EventLoop<T> {
           // Propagate as Resized so tauri's resize handler fires and calls
           // webview.set_bounds() with the new window dimensions.
           let size = PhysicalSize::new(content_rect.rect.width as _, content_rect.rect.height as _);
-          let event = event::Event::WindowEvent {
+          let resized_event = event::Event::WindowEvent {
             window_id: window::WindowId(WindowId),
             event: event::WindowEvent::Resized(size),
           };
 
           if let Some(ref mut h) = *self.event_loop.borrow_mut() {
-            h(event);
+            h(resized_event);
+
+            // Also emit ContentRectChanged for lifecycle-aware applications
+            let reason = match content_rect.reason {
+              openharmony_ability::RectChangeReason::Undefined => 0,
+              openharmony_ability::RectChangeReason::Maximize => 1,
+              openharmony_ability::RectChangeReason::Recover => 2,
+              openharmony_ability::RectChangeReason::Move => 3,
+              openharmony_ability::RectChangeReason::Drag => 4,
+              openharmony_ability::RectChangeReason::DragStart => 5,
+              openharmony_ability::RectChangeReason::DragEnd => 6,
+            };
+            h(event::Event::ContentRectChanged {
+              rect: (content_rect.rect.left, content_rect.rect.top, content_rect.rect.width, content_rect.rect.height),
+              reason,
+            });
           }
         }
         MainEvent::GainedFocus => {
@@ -556,23 +571,39 @@ impl<T: 'static> EventLoop<T> {
           }
         }
         MainEvent::Start => {
-          // XXX: how to forward this state to applications?
-          warn!("TODO: forward onStart notification to application");
+          if let Some(ref mut h) = *self.event_loop.borrow_mut() {
+            h(event::Event::Started);
+          }
         }
         MainEvent::Resume { .. } => {
+          // NOTE: The SaveLoader handle for state restoration is intentionally
+          // discarded. State I/O is not yet wired through to applications.
           if let Some(ref mut h) = *self.event_loop.borrow_mut() {
             h(event::Event::Resumed);
           }
         }
         MainEvent::SaveState { .. } => {
-          // XXX: how to forward this state to applications?
-          // XXX: also how do we expose state restoration to apps?
-          warn!("TODO: forward saveState notification to application");
+          // NOTE: The SaveSaver handle for state persistence is intentionally
+          // discarded. Applications receive SaveStateRequested as a notification
+          // only; actual state writing via SaveSaver is not yet supported.
+          if let Some(ref mut h) = *self.event_loop.borrow_mut() {
+            h(event::Event::SaveStateRequested);
+          }
         }
+        // OHOS lifecycle: Pause = about to enter background (surface still alive).
+        // Mapped to Suspended for cross-platform consistency with Android/iOS.
+        // Note: this fires earlier than a full "Stop/Hidden" state.
         MainEvent::Pause => {
-          debug!("App Paused - stopped running");
-          // TODO: This is incorrect - will be solved in https://github.com/rust-windowing/winit/pull/3897
-          // self.running = false;
+          if let Some(ref mut h) = *self.event_loop.borrow_mut() {
+            h(event::Event::Suspended);
+          }
+        }
+        // OHOS lifecycle: Stop = ability fully hidden/backgrounded (StageEventType::Hidden).
+        // Also mapped to Suspended — apps see a second Suspended when fully backgrounded.
+        MainEvent::Stop => {
+          if let Some(ref mut h) = *self.event_loop.borrow_mut() {
+            h(event::Event::Suspended);
+          }
         }
         MainEvent::WindowDestroy => {
           if let Some(ref mut h) = *self.event_loop.borrow_mut() {
