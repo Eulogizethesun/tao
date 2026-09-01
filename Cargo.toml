@@ -111,6 +111,13 @@ tao-macros = { version = "0.1.0", path = "./tao-macros" }
 [target."cfg(target_env = \"ohos\")".dependencies]
 openharmony-ability = { git = "https://github.com/Eulogizethesun/openharmony-ability", branch = "ohdev-git" }
 openharmony-ability-derive = { git = "https://github.com/Eulogizethesun/openharmony-ability", branch = "ohdev-git" }
+openharmony-ability-plugin-window = { git = "https://github.com/Eulogizethesun/openharmony-ability", branch = "ohdev-git" }
+openharmony-ability-plugin-app-control = { git = "https://github.com/Eulogizethesun/openharmony-ability", branch = "ohdev-git" }
+# tao is a standalone workspace (members = ["tao-macros"], no [workspace.dependencies]).
+# Cannot use workspace = true; pin directly to match openharmony-ability's tokio version.
+# "sync" is the decor watcher channel; "time" is its bounded resize-landing recheck
+# (one delayed retry, NOT the removed 15s polling loop).
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [target."cfg(any(target_os = \"ios\", target_os = \"macos\"))".dependencies]
 objc2 = "0.6"
