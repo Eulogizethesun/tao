@@ -1678,7 +1678,14 @@ pub enum ResizeDirection {
   West,
 }
 
-#[allow(dead_code)]
+// Only the Windows and Linux backends call `hit_test` (note the OHOS backend
+// is target_os = "linux" with target_env = "ohos" and does not call it); keep
+// the dead-code allowance scoped to the platforms that don't use it instead
+// of silencing the lint everywhere (tao issue #84).
+#[cfg_attr(
+  not(any(windows, all(target_os = "linux", not(target_env = "ohos")))),
+  allow(dead_code)
+)]
 pub(crate) fn hit_test(
   (left, top, right, bottom): (i32, i32, i32, i32),
   cx: i32,
@@ -1711,19 +1718,5 @@ pub(crate) fn hit_test(
     BOTTOMLEFT => Some(ResizeDirection::SouthWest),
     BOTTOMRIGHT => Some(ResizeDirection::SouthEast),
     _ => None,
-  }
-}
-
-/// OS-specific extensions for the [`Window`] on OpenHarmony.
-#[cfg(target_env = "ohos")]
-pub trait WindowExtOhos {
-  /// Returns the OHOS OS-level window ID (0 for main UIAbility window, >0 for Float sub-windows).
-  fn ohos_window_id(&self) -> Option<i64>;
-}
-
-#[cfg(target_env = "ohos")]
-impl WindowExtOhos for Window {
-  fn ohos_window_id(&self) -> Option<i64> {
-    self.window.window_id()
   }
 }

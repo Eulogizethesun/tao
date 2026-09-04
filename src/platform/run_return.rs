@@ -2,7 +2,14 @@
 // Copyright 2021-2023 Tauri Programme within The Commons Conservancy
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(not(target_os = "ios"))]
+// OHOS is excluded: its event loop is callback-driven (the main thread must be
+// returned to ArkTS), so `run_return` cannot honor the trait contract of
+// "return control flow to the caller on `ControlFlow::Exit`" — it registers the
+// handler and returns immediately, and the soundness of storing the handler
+// relied on an unsafe transmute of a potentially non-`'static` closure
+// (tao issue #84). Downstream runtimes alias `run_return` to `run` on OHOS, the
+// same way they already do on iOS.
+#![cfg(all(not(target_os = "ios"), not(target_env = "ohos")))]
 
 use crate::{
   event::Event,
