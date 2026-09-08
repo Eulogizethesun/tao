@@ -1,0 +1,1384 @@
+use std::cell::{Cell, RefCell};
+use std::collections::{HashSet, VecDeque};
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+
+use openharmony_ability::xcomponent::{Action, MouseButton as OhosMouseButton, TouchEvent};
+use openharmony_ability::{AxisEventData, InputSourceType, MouseAction, MouseEventData};
+use openharmony_ability::{
+  ime::KeyboardStatus, Event as MainEvent, ImeEvent, InputEvent, OpenHarmonyApp,
+  OpenHarmonyWaker,
+};
+use openharmony_ability_plugin_app_control::{AppControlExt, ColorModeExt};
+
+use crate::dpi::{PhysicalPosition, PhysicalSize};
+use crate::error;
+use crate::event::{self, ElementState, Force, StartCause};
+use crate::event_loop::{self, ControlFlow};
+use crate::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NativeKeyCode};
+use crate::monitor;
+use crate::window::{self, Theme};
+
+use super::keycodes::{to_location, to_logical};
+use super::monitor::MonitorHandle;
+use super::window::{WindowId, WINDOW_MIRRORS};
+
+pub(crate) static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
+
+/// App-level theme override (issue 5, 5.2 theme backfill).
+/// `set_theme(Some)` writes an explicit override; `set_theme(None)` writes FOLLOW (follow system).
+/// `theme()` reads this override: on FOLLOW it falls back to `app.config().color_mode`
+/// (continuously refreshed by the ConfigChanged event, reflecting system truth, no
+/// manual backfill needed). Global rather than per-window, because OHOS setColorMode
+/// is itself global (not window-level).
+pub(crate) const THEME_OVERRIDE_LIGHT: u8 = 0;
+pub(crate) const THEME_OVERRIDE_DARK: u8 = 1;
+pub(crate) const THEME_OVERRIDE_FOLLOW: u8 = 2;
+pub(crate) static APP_THEME_OVERRIDE: AtomicU8 = AtomicU8::new(THEME_OVERRIDE_FOLLOW);
+
+/// Last known cursor position lives in the process-level cursor statics inside
+/// openharmony-ability (vp, MainPage-relative), fed by the ArkTS
+/// `MainPage.onMouse` handler via the `update_cursor_position` NAPI function
+/// and read back through `OpenHarmonyApp::cursor_position()` (physical px).
+/// The NDK XComponent mouse path never fires while the cursor is over the
+/// WebView (which covers the window), so it cannot be the tracking source.
+
+/// Background tokio runtime for spawning async bridge calls (fire-and-forget).
+///
+/// `WindowClient` methods are `async` and return `Result<()>`. tao's window
+/// operation APIs (e.g. `set_inner_size`) are synchronous and return `()` — they
+/// cannot `.await`. `BridgeExecutor` wraps a `tokio::runtime::Handle` from a
+/// dedicated background thread (`ohos-bridge-rt`) that drives a current-thread
+/// runtime. Calling `spawn(future)` sends the future to that background thread
+/// to be polled. The TSFN NonBlocking call inside `WindowClient` returns
+/// immediately; the ArkTS callback runs on the main thread → no deadlock.
+///
+/// `tokio::runtime::Handle` is `Clone + Send + Sync`, so `BridgeExecutor` is
+/// safely cloneable and can be stored in both `EventLoop` and `Window`.
+#[derive(Clone)]
+pub(crate) struct BridgeExecutor {
+    handle: tokio::runtime::Handle,
+}
+
+impl BridgeExecutor {
+    fn new() -> Self {
+        // Panics here are acceptable: this runs exactly once during EventLoop
+        // construction, before the app is functional or any recovery path
+        // exists. A failure to build the tokio runtime or spawn its driver
+        // thread leaves the bridge (and thus all async window operations)
+        // unusable, so aborting is the only sane option.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create OHOS bridge runtime");
+        let handle = runtime.handle().clone();
+        std::thread::Builder::new()
+            .name("ohos-bridge-rt".into())
+            .spawn(move || runtime.block_on(std::future::pending::<()>()))
+            .expect("Failed to spawn bridge runtime thread");
+        Self { handle }
+    }
+
+    /// Spawn a fire-and-forget bridge call. The result is ignored.
+    pub(crate) fn spawn<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.handle.spawn(future);
+    }
+}
+
+// Tracks currently pressed keys for repeat detection.
+// When a Down event arrives for a key already in this set, it's a repeat.
+thread_local! {
+    static PRESSED_KEYS: RefCell<HashSet<i32>> = RefCell::new(HashSet::new());
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct KeyEventExtra {}
+
+/// Map an OHOS NDK MouseButton to tao's MouseButton.
+///
+/// Returns `None` for `NoneButton` (no meaningful button to report).
+fn ohos_mouse_button_to_tao(button: OhosMouseButton) -> Option<event::MouseButton> {
+  match button {
+    OhosMouseButton::LeftButton => Some(event::MouseButton::Left),
+    OhosMouseButton::RightButton => Some(event::MouseButton::Right),
+    OhosMouseButton::MiddleButton => Some(event::MouseButton::Middle),
+    OhosMouseButton::BackButton => Some(event::MouseButton::Other(4)),
+    OhosMouseButton::ForwardButton => Some(event::MouseButton::Other(5)),
+    OhosMouseButton::NoneButton => None,
+  }
+}
+
+/// Dispatch `event` to the user handler stored in `cell`, if one is installed.
+/// The `if let Some(ref mut h) = *cell.borrow_mut() { h(event) }` dance
+/// appeared ~27 times across the input handlers and the `run_loop` dispatch —
+/// this keeps it in one place (mirrors upstream android's
+/// `call_event_handler!`).
+macro_rules! call_event_handler {
+  ($cell:expr, $event:expr) => {
+    if let Some(ref mut handler) = *$cell.borrow_mut() {
+      handler($event);
+    }
+  };
+}
+
+/// Emit a synthesized press+release key pair on the main window (id 0).
+///
+/// The IME handlers use this to mock physical key events where OHOS only
+/// reports IME-level facts: Backspace/Enter edits arrive as IME events (no
+/// key events at all), and keyboard Hide needs a synthetic Enter so web
+/// engines commit their composition / fire blur.
+fn emit_synthetic_key<T: 'static>(
+  event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
+  logical_key: Key<'static>,
+  physical_key: KeyCode,
+) {
+  let _ = [ElementState::Pressed, ElementState::Released].map(|state| {
+    call_event_handler!(
+      event_loop_cell,
+      event::Event::WindowEvent {
+        window_id: window::WindowId(WindowId(0)),
+        event: event::WindowEvent::KeyboardInput {
+          device_id: event::DeviceId(DeviceId(0)),
+          event: event::KeyEvent {
+            state,
+            logical_key: logical_key.clone(),
+            physical_key,
+            platform_specific: KeyEventExtra {},
+            repeat: false,
+            location: KeyLocation::Standard,
+            text: None,
+          },
+          is_synthetic: false,
+        },
+      }
+    );
+  });
+}
+
+/// Shared cursor-position read (physical px), used by both
+/// `EventLoopWindowTarget::cursor_position` and `Window::cursor_position`.
+/// Fed by the ArkTS `MainPage.onMouse` handler via the
+/// `update_cursor_position` NAPI function; the vp→physical conversion and the
+/// bit-unpacking of the process statics live inside
+/// `OpenHarmonyApp::cursor_position` (issue #87 major-10) — see the
+/// CURSOR_POSITION note near the top of this file.
+pub(crate) fn cursor_position_from_app(
+  app: &OpenHarmonyApp,
+) -> Result<PhysicalPosition<f64>, error::ExternalError> {
+  let (x, y) = app.cursor_position();
+  Ok(PhysicalPosition::new(x, y))
+}
+
+/// Shared set_theme: write the global override (so `theme()` immediately
+/// reflects intent) and push the color mode through the MainThreadSync bridge.
+/// Used by both `EventLoopWindowTarget::set_theme` and `Window::set_theme`.
+pub(crate) fn set_app_theme(app: &OpenHarmonyApp, theme: Option<Theme>) {
+  use openharmony_ability::ColorMode;
+  APP_THEME_OVERRIDE.store(
+    match theme {
+      Some(Theme::Dark) => THEME_OVERRIDE_DARK,
+      Some(Theme::Light) => THEME_OVERRIDE_LIGHT,
+      None => THEME_OVERRIDE_FOLLOW,
+    },
+    Ordering::Relaxed,
+  );
+  let color_mode = match theme {
+    Some(Theme::Dark) => ColorMode::Dark,
+    Some(Theme::Light) => ColorMode::Light,
+    None => ColorMode::NoSet,
+  };
+  // Migrate from OpenHarmonyApp::set_color_mode (removed) to
+  // ColorModeExt::set_color_mode (MainThreadSync bridge call).
+  // Bridge contract: Dark=0, Light=1, NoSet=2.
+  let mode_i32 = match color_mode {
+    ColorMode::Dark => 0,
+    ColorMode::Light => 1,
+    ColorMode::NoSet => 2,
+  };
+  let env_cell = openharmony_ability::get_main_thread_env();
+  let env_ref = env_cell.borrow();
+  if let Some(env) = env_ref.as_ref() {
+    if let Err(e) = app.set_color_mode(env, mode_i32) {
+      log::warn!("set_theme: failed to call set_color_mode: {:?}", e);
+    }
+  } else {
+    log::warn!("set_theme: main thread Env not available");
+  }
+}
+
+/// Shared monitor_from_point: OHOS is single-display, so return the (only)
+/// monitor when the point is within the default display bounds (DisplayManager
+/// physical pixels). See ohos-monitor-real-values. Used by both
+/// `EventLoopWindowTarget::monitor_from_point` and `Window::monitor_from_point`.
+pub(crate) fn monitor_from_point_for_app(app: &OpenHarmonyApp, x: f64, y: f64) -> Option<MonitorHandle> {
+  let w = app.display_width() as f64;
+  let h = app.display_height() as f64;
+  if w > 0.0 && h > 0.0 && x >= 0.0 && y >= 0.0 && x < w && y < h {
+    Some(MonitorHandle::new(app.clone()))
+  } else {
+    None
+  }
+}
+
+pub struct EventLoop<T: 'static> {
+  pub(crate) openharmony_app: OpenHarmonyApp,
+  window_target: Arc<event_loop::EventLoopWindowTarget<T>>,
+  user_events_sender: mpsc::Sender<T>,
+  user_events_receiver: Arc<RefCell<mpsc::Receiver<T>>>,
+  event_loop: Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PlatformSpecificEventLoopAttributes {
+  pub(crate) openharmony_app: Option<OpenHarmonyApp>,
+}
+
+impl Default for PlatformSpecificEventLoopAttributes {
+  fn default() -> Self {
+    Self {
+      openharmony_app: Default::default(),
+    }
+  }
+}
+
+impl<T: 'static> EventLoop<T> {
+  pub(crate) fn new(attributes: &PlatformSpecificEventLoopAttributes) -> Self {
+    let (user_events_sender, user_events_receiver) = mpsc::channel();
+
+    let openharmony_app = attributes.openharmony_app.as_ref().expect(
+      "An `OpenHarmonyApp` as passed to lib is required to create an `EventLoop` on \
+             OpenHarmony or HarmonyNext",
+    );
+
+    let bridge_executor = BridgeExecutor::new();
+
+    Self {
+      openharmony_app: openharmony_app.clone(),
+      window_target: Arc::new(event_loop::EventLoopWindowTarget {
+        p: EventLoopWindowTarget {
+          app: openharmony_app.clone(),
+          bridge_executor,
+          exit: Cell::new(false),
+          _marker: PhantomData,
+        },
+        _marker: PhantomData,
+      }),
+      user_events_sender,
+      user_events_receiver: Arc::new(RefCell::new(user_events_receiver)),
+      event_loop: Arc::new(RefCell::new(None)),
+    }
+  }
+
+  pub(crate) fn window_target(&self) -> &event_loop::EventLoopWindowTarget<T> {
+    &*self.window_target
+  }
+
+  // TODO: For input event, we need some real examples to test it
+  // Input events originate from the *main* window's XComponent (Float sub-windows do
+  // not own an XComponent / render surface). All input dispatch therefore uses
+  // window_id = 0 (main window). Phase 3 (design.md D6) only routes per-window for
+  // WindowResize / ContentRectChange; input remains main-window-scoped.
+  fn handle_input_event(event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>, event: &InputEvent) {
+    #[allow(unreachable_patterns)]
+    match event {
+      InputEvent::TouchEvent(motion_event) => {
+        let window_id = window::WindowId(WindowId(0));
+        let device_id = event::DeviceId(DeviceId(motion_event.device_id as _));
+        let action = motion_event.event_type;
+
+        let phase = match motion_event.event_type {
+          TouchEvent::Down => Some(event::TouchPhase::Started),
+          TouchEvent::Up => Some(event::TouchPhase::Ended),
+          TouchEvent::Move => Some(event::TouchPhase::Moved),
+          TouchEvent::Cancel => Some(event::TouchPhase::Cancelled),
+          _ => None,
+        };
+
+        if let Some(phase) = phase {
+          for pointer in motion_event.touch_points.iter() {
+            let position = PhysicalPosition {
+              x: pointer.x as _,
+              y: pointer.y as _,
+            };
+            trace!(
+              "Input event {device_id:?}, {action:?}, loc={position:?}, \
+                                 pointer={pointer:?}"
+            );
+
+            call_event_handler!(
+              event_loop_cell,
+              event::Event::WindowEvent {
+                window_id,
+                event: event::WindowEvent::Touch(event::Touch {
+                  device_id,
+                  phase,
+                  location: position,
+                  id: pointer.id as u64,
+                  force: Some(Force::Normalized(pointer.force as f64)),
+                }),
+              }
+            );
+          }
+        }
+      }
+      InputEvent::MouseEvent(mouse_event) => {
+        Self::handle_mouse_event(event_loop_cell, mouse_event);
+      }
+      InputEvent::AxisEvent(axis_event) => {
+        Self::handle_axis_event(event_loop_cell, axis_event);
+      }
+      InputEvent::KeyEvent(key) => {
+        let keycode = key.code;
+        {
+          let state = match key.action {
+            Action::Down => event::ElementState::Pressed,
+            Action::Up => event::ElementState::Released,
+            _ => event::ElementState::Released,
+          };
+
+          // Detect key repeat: if a Down event arrives for a key already
+          // in the pressed set, it's an auto-repeat from holding the key.
+          let key_raw = keycode as i32;
+          let repeat = PRESSED_KEYS.with(|keys| {
+            let mut keys = keys.borrow_mut();
+            match key.action {
+              Action::Down => !keys.insert(key_raw), // false if already present → repeat
+              Action::Up => { keys.remove(&key_raw); false }
+              _ => false,
+            }
+          });
+
+          let native = NativeKeyCode::Ohos(keycode.into());
+          let physical_key = KeyCode::Unidentified(native);
+          let logical_key = to_logical(keycode);
+
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::KeyboardInput {
+                device_id: event::DeviceId(DeviceId(key.device_id as _)),
+                event: event::KeyEvent {
+                  state,
+                  physical_key,
+                  logical_key,
+                  location: to_location(keycode),
+                  repeat,
+                  text: None,
+                  platform_specific: KeyEventExtra {},
+                },
+                is_synthetic: false,
+              },
+            }
+          );
+        }
+      }
+      InputEvent::ImeEvent(data) => match data {
+        ImeEvent::TextInputEvent(s) => {
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::ReceivedImeText(s.text.clone()),
+            }
+          );
+        }
+        ImeEvent::BackspaceEvent(_) => {
+          // No physical key events exist for IME edits — mock Backspace so
+          // web engines / GUI toolkits can react to the deletion.
+          emit_synthetic_key(event_loop_cell, Key::Backspace, KeyCode::Backspace);
+        }
+        ImeEvent::EnterEvent(_) => {
+          // Same as Backspace: mock an Enter key press.
+          emit_synthetic_key(event_loop_cell, Key::Enter, KeyCode::Enter);
+        }
+        ImeEvent::ImeStatusEvent(s) => match s {
+          KeyboardStatus::Hide => {
+            // Mock an Enter key press so egui/web engines receive a key event
+            // and trigger their onblur/commit behavior on keyboard hide.
+            emit_synthetic_key(event_loop_cell, Key::Enter, KeyCode::Enter);
+          }
+          _ => {
+            warn!("Unknown openharmony_ability ime status event {s:?}")
+          }
+        },
+      },
+      _ => {
+        warn!("Unknown openharmony_ability input event {event:?}")
+      }
+    }
+  }
+
+  /// Handle mouse events from the OHOS NDK, converting them to tao WindowEvents.
+  fn handle_mouse_event(event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>, mouse_event: &MouseEventData) {
+    let window_id = window::WindowId(WindowId(0));
+    // Use device_id 0 for mouse, consistent across events.
+    let device_id = event::DeviceId(DeviceId(0));
+
+    match mouse_event.action {
+      MouseAction::Move => {
+        // Cursor tracking is NOT done here: the NDK mouse callback never fires
+        // while the cursor is over the WebView. See the CURSOR_POSITION note
+        // near the top of this file.
+        let position = PhysicalPosition {
+          x: mouse_event.x as f64,
+          y: mouse_event.y as f64,
+        };
+        call_event_handler!(
+          event_loop_cell,
+          event::Event::WindowEvent {
+            window_id,
+            event: event::WindowEvent::CursorMoved {
+              device_id,
+              position,
+              modifiers: ModifiersState::empty(),
+            },
+          }
+        );
+      }
+      MouseAction::Press => {
+        if let Some(button) = ohos_mouse_button_to_tao(mouse_event.button) {
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id,
+              event: event::WindowEvent::MouseInput {
+                device_id,
+                state: ElementState::Pressed,
+                button,
+                modifiers: ModifiersState::empty(),
+              },
+            }
+          );
+        }
+      }
+      MouseAction::Release => {
+        if let Some(button) = ohos_mouse_button_to_tao(mouse_event.button) {
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id,
+              event: event::WindowEvent::MouseInput {
+                device_id,
+                state: ElementState::Released,
+                button,
+                modifiers: ModifiersState::empty(),
+              },
+            }
+          );
+        }
+      }
+      MouseAction::HoverEnter => {
+        call_event_handler!(
+          event_loop_cell,
+          event::Event::WindowEvent {
+            window_id,
+            event: event::WindowEvent::CursorEntered { device_id },
+          }
+        );
+      }
+      MouseAction::HoverLeave => {
+        call_event_handler!(
+          event_loop_cell,
+          event::Event::WindowEvent {
+            window_id,
+            event: event::WindowEvent::CursorLeft { device_id },
+          }
+        );
+      }
+      MouseAction::None => {
+        // Ignore None events
+      }
+    }
+  }
+
+  /// Handle axis (scroll wheel) events from the OHOS ArkUI runtime.
+  fn handle_axis_event(event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>, axis_event: &AxisEventData) {
+    let window_id = window::WindowId(WindowId(0));
+    let device_id = event::DeviceId(DeviceId(0));
+    let is_touchpad = axis_event.source_type == InputSourceType::Touchpad;
+
+    // Emit scroll wheel event.
+    // Use PixelDelta for touchpad (pixel-based), LineDelta for mouse wheel (line-based).
+    if axis_event.delta_x != 0.0 || axis_event.delta_y != 0.0 {
+      let delta = if is_touchpad {
+        event::MouseScrollDelta::PixelDelta(PhysicalPosition {
+          x: axis_event.delta_x as f64,
+          y: axis_event.delta_y as f64,
+        })
+      } else {
+        event::MouseScrollDelta::LineDelta(axis_event.delta_x, axis_event.delta_y)
+      };
+
+      call_event_handler!(
+        event_loop_cell,
+        event::Event::WindowEvent {
+          window_id,
+          event: event::WindowEvent::MouseWheel {
+            device_id,
+            delta,
+            phase: event::TouchPhase::Moved,
+            modifiers: ModifiersState::empty(),
+          },
+        }
+      );
+    }
+
+    // Emit pinch scale as Ctrl+MouseWheel, which WebView interprets as zoom.
+    // pinch_scale: 1.0 = no change, >1.0 = zoom in, <1.0 = zoom out, 0.0 = no pinch.
+    if axis_event.pinch_scale != 0.0 && axis_event.pinch_scale != 1.0 {
+      let zoom_delta = if axis_event.pinch_scale > 1.0 {
+        // Zooming in: positive delta
+        1.0
+      } else {
+        // Zooming out: negative delta
+        -1.0
+      };
+
+      call_event_handler!(
+        event_loop_cell,
+        event::Event::WindowEvent {
+          window_id,
+          event: event::WindowEvent::MouseWheel {
+            device_id,
+            delta: event::MouseScrollDelta::LineDelta(0.0, zoom_delta),
+            phase: event::TouchPhase::Moved,
+            modifiers: ModifiersState::CONTROL,
+          },
+        }
+      );
+    }
+  }
+
+  pub fn run<F>(self, event_handler: F) -> ()
+  where
+    F: 'static + FnMut(event::Event<T>, &event_loop::EventLoopWindowTarget<T>, &mut ControlFlow),
+  {
+    // Leak the EventLoop on purpose: OHOS is callback-driven — `run` returns
+    // immediately after registering the handler (the main thread must be
+    // handed back to ArkTS), but the stored handler stays reachable from the
+    // ArkTS lifecycle callbacks for the entire lifetime of the ability, i.e.
+    // long after the caller's stack frame is gone. This is a singleton
+    // semantic: exactly one EventLoop per process, never dropped (tao issue
+    // #84, item 4).
+    let event_looper = Box::leak(Box::new(self));
+    event_looper.run_return(event_handler);
+  }
+
+  /// Registers `event_handle` and returns immediately — OHOS is callback
+  /// driven, so unlike other platforms this neither pumps events nor returns
+  /// on `ControlFlow::Exit` (which instead terminates the ability; see the
+  /// exit check at the end of the `run_loop` dispatch below). The shared
+  /// `EventLoopExtRunReturn` trait is cfg'd out on OHOS, so this is only
+  /// reached through `run` — hence the `'static` bound.
+  pub fn run_return<F>(&mut self, mut event_handle: F) -> i32
+  where
+    F: 'static + FnMut(event::Event<T>, &event_loop::EventLoopWindowTarget<T>, &mut ControlFlow),
+  {
+    let mut control_flow = ControlFlow::default();
+    let target = self.window_target.clone();
+
+    // `event_handle` is `'static` (the only caller is `run`, and OHOS is
+    // excluded from the shared `EventLoopExtRunReturn` trait), so the boxed
+    // closure satisfies the `'static` handler slot directly. The transmute
+    // this used to rely on was unsound: that trait permits non-`'static`
+    // closures, whose captures could be freed while the permanently stored
+    // handler is still reachable (tao issue #84, item 1).
+    let handle: Box<dyn FnMut(event::Event<T>)> = Box::new(move |e| {
+      event_handle(e, &*target, &mut control_flow);
+      // We need to dispatch it after every event callbacks.
+      event_handle(event::Event::MainEventsCleared, &*target, &mut control_flow);
+      // Propagate a handler-set `ControlFlow::Exit` to the platform
+      // exit check at the end of each MainEvent dispatch. Without this
+      // the check is dead code: nothing else ever writes `exit`, so the
+      // terminate branch below was unreachable (tao issue #84).
+      if control_flow == ControlFlow::Exit {
+        target.p.exit.set(true);
+      }
+    });
+    self.event_loop.replace(Some(handle));
+
+    // Snapshot the shared cells as `'static` clones so the dispatch closure passed
+    // to `run_loop` (which requires `F: FnMut(MainEvent) + 'static`) captures no
+    // borrows of `self`.
+    let event_loop_cell = self.event_loop.clone();
+    let user_events_rx = self.user_events_receiver.clone();
+    let window_target = self.window_target.clone();
+    let app = self.openharmony_app.clone();
+
+    app.clone().run_loop(move |event| {
+      // ── OHOS window lifecycle backfill (moved from tauri-runtime-wry) ──
+      // ArkTS calls notifyWindowClose() synchronously (pushes the OHOS window
+      // id to the ability queue) then destroyWindow() asynchronously; draining
+      // at the start of every MainEvent dispatch reads the stored Rust state
+      // before the async destruction completes. Closes are synthesized as
+      // standard `CloseRequested` events routed by the real OHOS window id —
+      // downstream runtimes see a normal tao close. Status changes are applied
+      // straight to the registered window mirrors.
+      for ohos_win_id in openharmony_ability::drain_pending_window_closes() {
+        call_event_handler!(
+          event_loop_cell,
+          event::Event::WindowEvent {
+            window_id: window::WindowId(WindowId(ohos_win_id as i64)),
+            event: event::WindowEvent::CloseRequested,
+          }
+        );
+      }
+      for (ohos_win_id, status) in openharmony_ability::drain_pending_window_status() {
+        let ohos_win_id = ohos_win_id as i64;
+        let mirror = {
+          let mut mirrors = WINDOW_MIRRORS.lock().expect("WINDOW_MIRRORS poisoned");
+          match mirrors.get(&ohos_win_id) {
+            Some(weak) => match weak.upgrade() {
+              Some(mirror) => Some(mirror),
+              // Dead entry: the window was dropped without running Drop
+              // (e.g. leaked) — lazily remove it so the map does not grow.
+              None => {
+                mirrors.remove(&ohos_win_id);
+                None
+              }
+            },
+            None => None,
+          }
+        };
+        match mirror {
+          Some(mirror) => mirror.apply_window_status(status),
+          None => {
+            // G6 / cross-cutting: a failed Float window has window_id=None
+            // (never registered, produces no status events), so an unmatched
+            // drained status means a real window was destroyed between
+            // enqueue and drain (stale id). Non-zero ids are diagnosable
+            // stale ids → warn; id 0 (main window before registration) stays
+            // at debug to avoid noise.
+            if ohos_win_id != 0 {
+              log::warn!(
+                "[tao-ohos] pending window status for id {} (status={}) matched no live window \
+                 (stale id: window destroyed between enqueue and drain)",
+                ohos_win_id, status
+              );
+            } else {
+              log::debug!(
+                "[tao-ohos] pending window status for id 0 (status={}) matched no live window",
+                status
+              );
+            }
+          }
+        }
+      }
+
+      match event {
+        MainEvent::SurfaceCreate { .. } => {
+          call_event_handler!(event_loop_cell, event::Event::NewEvents(StartCause::Init));
+          call_event_handler!(event_loop_cell, event::Event::Resumed);
+        }
+        MainEvent::SurfaceDestroy { .. } => {
+          call_event_handler!(event_loop_cell, event::Event::Suspended);
+        }
+        MainEvent::WindowResize { window_id, size } => {
+          // Phase 3 (design.md D6): route by the originating window's id instead of
+          // the ZST constant. window_id comes from the ArkTS-wrapped options
+          // (lifecycle.rs window_resize closure / xcomponent.rs on_surface_changed).
+          let size = PhysicalSize::new(size.width as _, size.height as _);
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(window_id)),
+              event: event::WindowEvent::Resized(size),
+            }
+          );
+        }
+        MainEvent::WindowRedraw { .. } => {
+          // RedrawRequested is driven by the XComponent frame callback, which is
+          // the *main* window's render surface only (Float sub-windows do not own
+          // an XComponent). Keep window_id = 0 (main window).
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::RedrawRequested(window::WindowId(WindowId(0)))
+          );
+        }
+        MainEvent::ContentRectChange(content_rect) => {
+          // Propagate as Resized so tauri's resize handler fires and calls
+          // webview.set_bounds() with the new window dimensions.
+          // Phase 3 (design.md D6): route by content_rect.window_id (populated by the
+          // window_rect_change lifecycle closure from the ArkTS-wrapped windowId).
+          let size = PhysicalSize::new(content_rect.rect.width as _, content_rect.rect.height as _);
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(content_rect.window_id)),
+              event: event::WindowEvent::Resized(size),
+            }
+          );
+        }
+        MainEvent::GainedFocus => {
+          // Focus is an app-level UIAbility stage event (StageEventType::ACTIVE),
+          // not per-Float-sub-window. Keep window_id = 0 (main window).
+          HAS_FOCUS.store(true, Ordering::Relaxed);
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::Focused(true),
+            }
+          );
+        }
+        MainEvent::LostFocus => {
+          // Focus is an app-level UIAbility stage event (StageEventType::INACTIVE).
+          // Keep window_id = 0 (main window).
+          HAS_FOCUS.store(false, Ordering::Relaxed);
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::Focused(false),
+            }
+          );
+        }
+        MainEvent::ConfigChanged { .. } => {
+          // Configuration changes are app-level (EnvironmentCallback), not tied to a
+          // specific window. Keep window_id = 0 (main window).
+          let size = app.content_rect();
+          let scale = app.scale();
+          let mut size = PhysicalSize::new(size.width as _, size.height as _);
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::ScaleFactorChanged {
+                new_inner_size: &mut size,
+                scale_factor: scale as _,
+              },
+            }
+          );
+        }
+        MainEvent::Start => {
+          // WindowStageEventType::SHOWN (window visible to user). Forwarded as
+          // Event::Resumed — tao's closest lifecycle signal to OHOS "window-shown".
+          // Double Resumed (alongside SurfaceCreate/Resume) is acceptable; downstream
+          // tauri RunEvent::Resumed handlers must be idempotent.
+          // See openspec ohos-event-lifecycle-forward.
+          call_event_handler!(event_loop_cell, event::Event::Resumed);
+        }
+        MainEvent::Resume { .. } => {
+          call_event_handler!(event_loop_cell, event::Event::Resumed);
+        }
+        MainEvent::SaveState { .. } => {
+          // onAbilitySaveState has no tao Event/StartCause equivalent (no Autosave
+          // variant). Degraded: dropped with debug log. Apps must persist state via
+          // tauri RunEvent::Exit/ExitRequested or custom logic.
+          // See openspec ohos-event-lifecycle-forward.
+          debug!("SaveState has no tao Event equivalent; dropped (see ohos-event-lifecycle-forward)");
+        }
+        MainEvent::Pause => {
+          debug!("App Paused - stopped running");
+          // TODO: This is incorrect - will be solved in https://github.com/rust-windowing/winit/pull/3897
+          // self.running = false;
+        }
+        MainEvent::WindowDestroy => {
+          // This fires from the UIAbility `onWindowStageDestroy` lifecycle callback,
+          // which corresponds to the *main* UIAbility window stage being torn down —
+          // not Float sub-windows (those are destroyed via the separate ArkTS
+          // destroyWindow() path drained by tauri-runtime-wry's
+          // drain_pending_window_closes()). UIAbility is a singleton (enforced by the
+          // UIABILITY_CREATED guard in Window::new), so at most one main window stage
+          // exists; this path dispatches CloseRequested + Destroyed for it.
+          // Keep window_id = 0 (main window).
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::CloseRequested,
+            }
+          );
+          // Also dispatch Destroyed so tauri-runtime-wry can clean up the window.
+          call_event_handler!(
+            event_loop_cell,
+            event::Event::WindowEvent {
+              window_id: window::WindowId(WindowId(0)),
+              event: event::WindowEvent::Destroyed,
+            }
+          );
+        }
+        MainEvent::Destroy => {
+          call_event_handler!(event_loop_cell, event::Event::LoopDestroyed);
+        }
+        MainEvent::Input(input_event) => {
+          Self::handle_input_event(&event_loop_cell, &input_event);
+        }
+        // OHOS: intentionally diverges from Android/iOS — always emit Event::Opened
+        // even when urls is empty.
+        //
+        // On Android/iOS, Event::Opened is a pure "open URL" signal and is skipped
+        // when urls is empty. On OHOS, `onNewWant` serves as the "re-launch" signal
+        // (the OS prevents creating a second instance), so we emit Event::Opened on
+        // every re-launch to allow the single-instance plugin to trigger its callback.
+        // The want.parameters from the global Mutex carries system-injected fields
+        // even when no URI is provided.
+        //
+        // Impact on other consumers:
+        // - deep-link plugin: gated with #[cfg(any(macos, ios))], not affected on OHOS
+        // - other consumers: typically just log the urls, no functional side effects
+        MainEvent::NewWant { uri } => {
+          let urls = if uri.is_empty() {
+            vec![]
+          } else {
+            match url::Url::parse(&uri) {
+              Ok(url) => vec![url],
+              Err(e) => {
+                log::error!("failed to parse NewWant URI '{uri}': {e}");
+                vec![]
+              }
+            }
+          };
+          call_event_handler!(event_loop_cell, event::Event::Opened { urls });
+        }
+        MainEvent::UserEvent { .. } => {
+          // Drain ALL pending user events on each wake, not just one.
+          //
+          // Async plugin commands (window/webview/event — all `async fn`)
+          // resolve on tokio worker threads and send their response
+          // `EvaluateScript` ("runCallback(...)") via `proxy.send_event` →
+          // waker TSFN. The TSFN NonBlocking wake can be coalesced: N queued
+          // events may produce only ONE `MainEvent::UserEvent`. A single
+          // `try_recv` would fetch just one and leave the rest stranded until
+          // the next wake (which may never come promptly), so `runCallback`
+          // never runs → the JS Promise never settles → 5000ms test timeout.
+          // Custom (sync) commands don't hit this: they resolve on the main
+          // thread and go through `send_user_message`'s synchronous
+          // main-thread branch (direct `handle_user_message`), bypassing the
+          // waker/drain path entirely.
+          while let Ok(event) = user_events_rx.borrow_mut().try_recv() {
+            call_event_handler!(event_loop_cell, event::Event::UserEvent(event));
+          }
+        }
+        unknown => {
+          trace!("Unknown MainEvent {unknown:?} (ignored)");
+        }
+      };
+
+      if window_target.p.exit.get() {
+        call_event_handler!(event_loop_cell, event::Event::LoopDestroyed);
+        // Migrate from OpenHarmonyApp::exit(0) (removed) to
+        // AppControlExt::terminate(env, 0) (MainThreadSync bridge call).
+        // run_loop callbacks execute on the N-API main thread, so
+        // get_main_thread_env() returns Some(env).
+        let env_cell = openharmony_ability::get_main_thread_env();
+        let env_ref = env_cell.borrow();
+        if let Some(env) = env_ref.as_ref() {
+          if let Err(e) = app.terminate(env, 0) {
+            log::warn!("[tao-ohos] terminate failed: {:?}", e);
+          }
+        } else {
+          log::warn!("[tao-ohos] terminate failed: main thread Env not available");
+        }
+      }
+    });
+    0
+  }
+
+  pub fn create_proxy(&self) -> EventLoopProxy<T> {
+    EventLoopProxy {
+      user_events_sender: self.user_events_sender.clone(),
+      waker: self.openharmony_app.create_waker(),
+    }
+  }
+}
+
+pub struct EventLoopProxy<T: 'static> {
+  user_events_sender: mpsc::Sender<T>,
+  waker: OpenHarmonyWaker,
+}
+
+impl<T: 'static> EventLoopProxy<T> {
+  pub fn send_event(&self, event: T) -> Result<(), event_loop::EventLoopClosed<T>> {
+    self
+      .user_events_sender
+      .send(event)
+      .map_err(|err| event_loop::EventLoopClosed(err.0))?;
+    self.waker.wake();
+    Ok(())
+  }
+}
+
+impl<T: 'static> Clone for EventLoopProxy<T> {
+  fn clone(&self) -> Self {
+    EventLoopProxy {
+      user_events_sender: self.user_events_sender.clone(),
+      waker: self.waker.clone(),
+    }
+  }
+}
+
+#[derive(Clone)]
+pub struct EventLoopWindowTarget<T: 'static> {
+  pub(crate) app: OpenHarmonyApp,
+  pub(crate) bridge_executor: BridgeExecutor,
+  exit: Cell<bool>,
+  _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: 'static> EventLoopWindowTarget<T> {
+  pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
+    let mut v = VecDeque::with_capacity(1);
+    v.push_back(MonitorHandle::new(self.app.clone()));
+    v
+  }
+
+  pub fn primary_monitor(&self) -> Option<monitor::MonitorHandle> {
+    Some(monitor::MonitorHandle {
+      inner: MonitorHandle::new(self.app.clone()),
+    })
+  }
+
+  #[inline]
+  pub fn monitor_from_point(&self, x: f64, y: f64) -> Option<MonitorHandle> {
+    monitor_from_point_for_app(&self.app, x, y)
+  }
+
+  #[cfg(feature = "rwh_05")]
+  #[inline]
+  pub fn raw_display_handle_rwh_05(&self) -> rwh_05::RawDisplayHandle {
+    unreachable!("rwh_05 is not supported on OpenHarmony");
+  }
+
+  #[cfg(feature = "rwh_06")]
+  #[inline]
+  pub fn raw_display_handle_rwh_06(&self) -> Result<rwh_06::RawDisplayHandle, rwh_06::HandleError> {
+    Ok(rwh_06::RawDisplayHandle::Ohos(
+      rwh_06::OhosDisplayHandle::new(),
+    ))
+  }
+
+  pub fn cursor_position(&self) -> Result<PhysicalPosition<f64>, error::ExternalError> {
+    cursor_position_from_app(&self.app)
+  }
+
+  pub fn set_theme(&self, theme: Option<Theme>) {
+    set_app_theme(&self.app, theme);
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DeviceId(i32);
+
+impl DeviceId {
+  pub const fn dummy() -> Self {
+    DeviceId(0)
+  }
+}
+
+/// Direct unit tests for the input-event handlers. These handlers are pure
+/// transforms (OHOS input data -> tao events via an injected callback cell);
+/// the app autotest never triggers them because no user input occurs, so we
+/// exercise them directly with synthetic events.
+#[cfg(test)]
+mod input_tests {
+  use super::*;
+  use openharmony_ability::TextInputEventData;
+  use openharmony_ability::xcomponent::{
+    EventSource, KeyCode as OhosKeyCode, KeyEventData, TouchEventData, TouchPointData,
+  };
+  use std::sync::Mutex;
+
+  type LoopCell<T> = Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>;
+
+  /// Runs `invoke` with a collector installed in a fresh event-loop cell and
+  /// returns compact descriptors of every event the handler emitted.
+  fn run_collected<T: 'static>(invoke: impl FnOnce(&LoopCell<T>)) -> Vec<String> {
+    let out: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = out.clone();
+    let cell: LoopCell<T> = Arc::new(RefCell::new(Some(Box::new(move |e: event::Event<T>| {
+      let desc = match e {
+        event::Event::WindowEvent { event: we, .. } => match we {
+          event::WindowEvent::CursorMoved { position, .. } => {
+            format!("CursorMoved({},{})", position.x, position.y)
+          }
+          event::WindowEvent::MouseInput { state, button, .. } => {
+            format!("MouseInput({:?},{:?})", state, button)
+          }
+          event::WindowEvent::CursorEntered { .. } => "CursorEntered".to_string(),
+          event::WindowEvent::CursorLeft { .. } => "CursorLeft".to_string(),
+          // `modifiers` is deprecated in favor of ModifiersChanged, but the
+          // synthetic wheel events still carry it — fine for a test matcher.
+          #[allow(deprecated)]
+          event::WindowEvent::MouseWheel { delta, modifiers, .. } => format!(
+            "MouseWheel({:?},ctrl={})",
+            delta,
+            modifiers.contains(ModifiersState::CONTROL)
+          ),
+          event::WindowEvent::Touch(t) => format!(
+            "Touch({:?},{},{},id={})",
+            t.phase, t.location.x, t.location.y, t.id
+          ),
+          event::WindowEvent::KeyboardInput { event: ke, .. } => format!(
+            "Key({:?},{:?},loc={:?},repeat={})",
+            ke.state, ke.logical_key, ke.location, ke.repeat
+          ),
+          event::WindowEvent::ReceivedImeText(s) => format!("ImeText({s})"),
+          _ => "Other".to_string(),
+        },
+        _ => "NonWindow".to_string(),
+      };
+      sink.lock().unwrap().push(desc);
+    }))));
+    invoke(&cell);
+    let x = out.lock().unwrap().clone();
+    x
+  }
+
+  fn mouse(action: MouseAction, button: OhosMouseButton) -> MouseEventData {
+    MouseEventData { x: 10.5, y: 20.25, action, button, ..Default::default() }
+  }
+
+  // ─── handle_mouse_event ──────────────────────────────────────────────
+
+  #[test]
+  fn mouse_move_emits_cursor_moved() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Move, OhosMouseButton::NoneButton),
+      );
+    });
+    assert_eq!(evs, vec!["CursorMoved(10.5,20.25)".to_string()]);
+  }
+
+  #[test]
+  fn mouse_press_release_left() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Press, OhosMouseButton::LeftButton),
+      );
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Release, OhosMouseButton::LeftButton),
+      );
+    });
+    assert_eq!(
+      evs,
+      vec![
+        "MouseInput(Pressed,Left)".to_string(),
+        "MouseInput(Released,Left)".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn mouse_press_back_button_maps_to_other4() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Press, OhosMouseButton::BackButton),
+      );
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Release, OhosMouseButton::ForwardButton),
+      );
+    });
+    assert_eq!(
+      evs,
+      vec![
+        "MouseInput(Pressed,Other(4))".to_string(),
+        "MouseInput(Released,Other(5))".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn mouse_press_none_button_emits_nothing() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::Press, OhosMouseButton::NoneButton),
+      );
+    });
+    assert!(evs.is_empty());
+  }
+
+  #[test]
+  fn mouse_hover_enter_leave() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::HoverEnter, OhosMouseButton::NoneButton),
+      );
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::HoverLeave, OhosMouseButton::NoneButton),
+      );
+    });
+    assert_eq!(
+      evs,
+      vec!["CursorEntered".to_string(), "CursorLeft".to_string()]
+    );
+  }
+
+  #[test]
+  fn mouse_none_action_emits_nothing() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_mouse_event(
+        cell,
+        &mouse(MouseAction::None, OhosMouseButton::NoneButton),
+      );
+    });
+    assert!(evs.is_empty());
+  }
+
+  // ─── handle_axis_event ───────────────────────────────────────────────
+
+  #[test]
+  fn axis_mouse_wheel_uses_line_delta() {
+    let evs = run_collected(|cell| {
+      let d = AxisEventData {
+        delta_x: 0.0,
+        delta_y: 3.0,
+        pinch_scale: 0.0,
+        source_type: InputSourceType::Mouse,
+        ..Default::default()
+      };
+      EventLoop::<()>::handle_axis_event(cell, &d);
+    });
+    assert_eq!(
+      evs,
+      vec!["MouseWheel(LineDelta(0.0, 3.0),ctrl=false)".to_string()]
+    );
+  }
+
+  #[test]
+  fn axis_touchpad_uses_pixel_delta() {
+    let evs = run_collected(|cell| {
+      let d = AxisEventData {
+        delta_x: 10.0,
+        delta_y: 20.0,
+        pinch_scale: 0.0,
+        source_type: InputSourceType::Touchpad,
+        ..Default::default()
+      };
+      EventLoop::<()>::handle_axis_event(cell, &d);
+    });
+    assert_eq!(
+      evs,
+      vec!["MouseWheel(PixelDelta(PhysicalPosition { x: 10.0, y: 20.0 }),ctrl=false)".to_string()]
+    );
+  }
+
+  #[test]
+  fn axis_pinch_zoom_in_and_out_emit_ctrl_wheel() {
+    let evs = run_collected(|cell| {
+      let in_ = AxisEventData { pinch_scale: 1.5, ..Default::default() };
+      let out_ = AxisEventData { pinch_scale: 0.5, ..Default::default() };
+      EventLoop::<()>::handle_axis_event(cell, &in_);
+      EventLoop::<()>::handle_axis_event(cell, &out_);
+    });
+    assert_eq!(
+      evs,
+      vec![
+        "MouseWheel(LineDelta(0.0, 1.0),ctrl=true)".to_string(),
+        "MouseWheel(LineDelta(0.0, -1.0),ctrl=true)".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn axis_idle_event_emits_nothing() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_axis_event(cell, &AxisEventData::default());
+    });
+    assert!(evs.is_empty());
+  }
+
+  // ─── handle_input_event dispatch ─────────────────────────────────────
+
+  #[test]
+  fn input_event_routes_mouse() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::MouseEvent(mouse(MouseAction::Move, OhosMouseButton::NoneButton)),
+      );
+    });
+    assert_eq!(evs, vec!["CursorMoved(10.5,20.25)".to_string()]);
+  }
+
+  #[test]
+  fn input_event_routes_axis() {
+    let evs = run_collected(|cell| {
+      let d = AxisEventData {
+        delta_y: 2.0,
+        source_type: InputSourceType::Mouse,
+        ..Default::default()
+      };
+      EventLoop::<()>::handle_input_event(cell, &InputEvent::AxisEvent(d));
+    });
+    assert_eq!(
+      evs,
+      vec!["MouseWheel(LineDelta(0.0, 2.0),ctrl=false)".to_string()]
+    );
+  }
+
+  #[test]
+  fn touch_down_emits_started_per_pointer() {
+    let mut touch = TouchEventData { event_type: TouchEvent::Down, ..Default::default() };
+    touch.touch_points = vec![
+      TouchPointData {
+        id: 7,
+        x: 1.5,
+        y: 2.5,
+        force: 0.5,
+        event_type: TouchEvent::Down,
+        ..Default::default()
+      },
+      TouchPointData {
+        id: 9,
+        x: 3.5,
+        y: 4.5,
+        force: 0.25,
+        event_type: TouchEvent::Down,
+        ..Default::default()
+      },
+    ];
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch));
+    });
+    assert_eq!(
+      evs,
+      vec![
+        "Touch(Started,1.5,2.5,id=7)".to_string(),
+        "Touch(Started,3.5,4.5,id=9)".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn touch_move_up_cancel_phases() {
+    for (ty, phase) in [
+      (TouchEvent::Move, "Moved"),
+      (TouchEvent::Up, "Ended"),
+      (TouchEvent::Cancel, "Cancelled"),
+    ] {
+      let mut touch = TouchEventData { event_type: ty, ..Default::default() };
+      touch.touch_points = vec![
+        TouchPointData { id: 1, event_type: ty, ..Default::default() },
+      ];
+      let evs = run_collected(|cell| {
+        EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch.clone()));
+      });
+      assert_eq!(evs, vec![format!("Touch({phase},0,0,id=1)")], "phase {phase}");
+    }
+  }
+
+  #[test]
+  fn touch_unknown_event_type_emits_nothing() {
+    let mut touch = TouchEventData { event_type: TouchEvent::Unknown, ..Default::default() };
+    touch.touch_points = vec![
+      TouchPointData { id: 1, event_type: TouchEvent::Unknown, ..Default::default() },
+    ];
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch));
+    });
+    assert!(evs.is_empty());
+  }
+
+  fn key(code: OhosKeyCode, action: Action) -> InputEvent {
+    InputEvent::KeyEvent(KeyEventData {
+      code,
+      action,
+      device_id: 3,
+      source: EventSource::Keyboard,
+      timestamp: 0,
+    })
+  }
+
+  #[test]
+  fn key_down_up_and_autorepeat() {
+    PRESSED_KEYS.with(|k| k.borrow_mut().clear());
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Up));
+    });
+    assert_eq!(evs.len(), 3);
+    assert!(
+      evs[0].starts_with("Key(Pressed,") && evs[0].ends_with(",repeat=false)"),
+      "{}",
+      evs[0]
+    );
+    assert!(evs[1].ends_with(",repeat=true)"), "{}", evs[1]);
+    assert!(evs[2].starts_with("Key(Released,"), "{}", evs[2]);
+    PRESSED_KEYS.with(|k| k.borrow_mut().clear());
+  }
+
+  #[test]
+  fn key_location_for_modifier_pairs() {
+    PRESSED_KEYS.with(|k| k.borrow_mut().clear());
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::ShiftLeft, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::ShiftRight, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::Numpad5, Action::Down));
+    });
+    assert_eq!(evs.len(), 3);
+    assert!(evs[0].contains("loc=Left"), "{}", evs[0]);
+    assert!(evs[1].contains("loc=Right"), "{}", evs[1]);
+    assert!(evs[2].contains("loc=Numpad"), "{}", evs[2]);
+    PRESSED_KEYS.with(|k| k.borrow_mut().clear());
+  }
+
+  // ─── IME events ──────────────────────────────────────────────────────
+
+  #[test]
+  fn ime_text_input_emits_received_ime_text() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::ImeEvent(ImeEvent::TextInputEvent(TextInputEventData {
+          text: "hello".to_string(),
+        })),
+      );
+    });
+    assert_eq!(evs, vec!["ImeText(hello)".to_string()]);
+  }
+
+  #[test]
+  fn ime_backspace_and_enter_mock_press_release_pairs() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::ImeEvent(ImeEvent::BackspaceEvent(1)),
+      );
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::ImeEvent(ImeEvent::EnterEvent(1)),
+      );
+    });
+    assert_eq!(evs.len(), 4);
+    assert!(evs[0].starts_with("Key(Pressed,Backspace"), "{}", evs[0]);
+    assert!(evs[1].starts_with("Key(Released,Backspace"), "{}", evs[1]);
+    assert!(evs[2].starts_with("Key(Pressed,Enter"), "{}", evs[2]);
+    assert!(evs[3].starts_with("Key(Released,Enter"), "{}", evs[3]);
+  }
+
+  #[test]
+  fn ime_status_hide_mocks_enter_show_is_ignored() {
+    let evs = run_collected(|cell| {
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::ImeEvent(ImeEvent::ImeStatusEvent(KeyboardStatus::Hide)),
+      );
+      EventLoop::<()>::handle_input_event(
+        cell,
+        &InputEvent::ImeEvent(ImeEvent::ImeStatusEvent(KeyboardStatus::Show)),
+      );
+    });
+    assert_eq!(evs.len(), 2);
+    assert!(
+      evs.iter().all(|e| e.starts_with("Key(") && e.contains("Enter")),
+      "{evs:?}"
+    );
+  }
+}
