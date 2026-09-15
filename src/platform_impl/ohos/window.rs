@@ -48,18 +48,25 @@ impl From<u64> for WindowId {
   }
 }
 
-/// OHOS window kind: determines whether this window reuses the existing
-/// UIAbility container (UIAbility) or creates a new OS-level floating window (Float).
+/// OHOS window kind: determines whether this window lives in a UIAbility
+/// container (UIAbility) or creates a new OS-level floating window (Float).
 ///
-/// Default is UIAbility. Only one UIAbility window can exist (singleton enforced).
-/// Use Float for sub-windows — requires explicit `.ohos_window_kind(Float)` on the builder.
+/// Default is UIAbility for the first window, Float for any later window.
+/// The first window must be a UIAbility (Float sub-windows attach to an
+/// existing UIAbility container); subsequent UIAbility windows spawn a new
+/// EntryAbility instance via `start_ui_ability` with a pre-allocated window
+/// id (openspec multi-uiability-windows, design D1/D2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OHOSWindowKind {
   UIAbility,
   Float,
 }
 
-static UIABILITY_CREATED: AtomicBool = AtomicBool::new(false);
+/// Latches once the first (UIAbility) window has been created. Only
+/// constraint it enforces: the first window must be a UIAbility — a Float
+/// window has no container to attach to. Replaces the old `UIABILITY_CREATED`
+/// singleton guard (design D2).
+static FIRST_WINDOW_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// Decoration button bitfield constants (aligned with openharmony-ability ArkTS).
 const FLAG_CLOSABLE: u8 = 1;
@@ -323,25 +330,30 @@ impl Window {
     pl_attrs: PlatformSpecificWindowBuilderAttributes,
   ) -> Result<Self, error::OsError> {
     // Resolve the window kind: explicit builder choice, else the first window
-    // defaults to UIAbility and any later one to Float (the single-UIAbility
-    // guard below still rejects a second UIAbility — the upstream
-    // start_ui_ability multi-UIAbility path is not ported; local window
-    // creation supports exactly one UIAbility + Float sub-windows).
+    // defaults to UIAbility and any later one to Float.
     let kind = match pl_attrs.window_kind {
       Some(kind) => kind,
-      None if !UIABILITY_CREATED.load(Ordering::SeqCst) => OHOSWindowKind::UIAbility,
+      None if !FIRST_WINDOW_CREATED.load(Ordering::SeqCst) => OHOSWindowKind::UIAbility,
       None => OHOSWindowKind::Float,
     };
-    let is_main_window = matches!(kind, OHOSWindowKind::UIAbility);
+    let is_ui_ability_window = matches!(kind, OHOSWindowKind::UIAbility);
 
-    if is_main_window {
-      if UIABILITY_CREATED.swap(true, Ordering::SeqCst) {
-        log::error!("UIAbility window already exists — only one is allowed");
-        return Err(os_error!(OsError));
-      }
+    // First-window latch (design D2): the first window must be a UIAbility —
+    // a Float sub-window attaches to an existing UIAbility container
+    // (WindowManager stage) and cannot bootstrap the process. Subsequent
+    // UIAbility windows are legal and take the start_ui_ability branch below.
+    // The bootstrap main window is created on the event-loop thread during
+    // app setup, before any command can race this swap.
+    let is_first_window = !FIRST_WINDOW_CREATED.swap(true, Ordering::SeqCst);
+    if is_first_window && !is_ui_ability_window {
+      // Roll back the latch: no window was created; a retry with a UIAbility
+      // window must still be able to bootstrap.
+      FIRST_WINDOW_CREATED.store(false, Ordering::SeqCst);
+      log::error!("the first OHOS window must be a UIAbility window (Float has no container to attach to)");
+      return Err(os_error!(OsError));
     }
 
-    let window_type = if is_main_window {
+    let window_type = if is_ui_ability_window {
       // UIAbility window does not need a window_type
       0
     } else {
@@ -349,10 +361,52 @@ impl Window {
       OHOSWindowType::TypeFloat as i32
     };
 
-    let window_id = if is_main_window {
-      // UIAbility window: reuse the existing main window container (DefaultXComponent).
-      // window_id = 0, wry takes Path 1 (WebViewBuilder).
-      Some(0)
+    let window_id = if is_ui_ability_window {
+      if is_first_window {
+        // First UIAbility window: the process's original EntryAbility instance
+        // (launched by the OS). window_id = 0, wry takes Path 1
+        // (WebViewBuilder on the existing DefaultXComponent).
+        Some(0)
+      } else {
+        // Subsequent UIAbility window: spawn a new EntryAbility instance via
+        // startAbility carrying this pre-allocated id (design D1). Window::new
+        // does NOT wait for the handshake (D7): register the pending ability
+        // with an event-loop waker synchronously, dispatch the startAbility
+        // want fire-and-forget on the bridge executor (HC-5: no block_on),
+        // and return immediately — wry queues webview ops for this id in its
+        // pending_ops queue until the instance registers its stage.
+        let window_id = openharmony_ability::next_window_id();
+        openharmony_ability::register_pending_ui_ability(window_id);
+        openharmony_ability::set_ui_ability_waker(window_id, el.app.create_waker());
+        let label = pl_attrs
+          .label
+          .clone()
+          .unwrap_or_else(|| window_attrs.title.clone());
+        // The webview URL is a wry attribute delivered after the stage
+        // registers (WebviewCreateRequest), not a want parameter (OQ5) — an
+        // empty url here only names the window for AMS-side bookkeeping.
+        let url = String::new();
+        let transparent = window_attrs.transparent;
+        let app = el.app.clone();
+        el.bridge_executor.clone().spawn(async move {
+          if let Err(e) = openharmony_ability_plugin_app_control::start_ui_ability(
+            &app,
+            window_id,
+            label,
+            url,
+            transparent,
+          )
+          .await
+          {
+            log::error!(
+              "[tao-ohos] start_ui_ability failed for window {}: {:?}",
+              window_id,
+              e
+            );
+          }
+        });
+        Some(window_id)
+      }
     } else {
       // Float window: create a new OS-level floating window via create_os_window.
       // window_id > 0, wry takes Path 2 (load_url).
@@ -469,13 +523,20 @@ impl Window {
     // Without this, the main window retains its default OS decorations even if
     // the builder specified .decorations(false), because Window::set_decorations()
     // is only called later (if at all) by the user.
-    if is_main_window && !window_attrs.decorations {
+    // window_id (not hardcoded 0): a subsequent UIAbility window with
+    // decorations(false) must not strip the primary window's decorations.
+    if is_ui_ability_window && !window_attrs.decorations {
       if let Some(ref client) = win.window_client {
         let client = client.clone();
+        let decorations_window_id = window_id.unwrap_or(0);
         win.runtime.spawn(async move {
-          if let Err(e) = client.set_window_decorations(0, false).await {
+          if let Err(e) = client
+            .set_window_decorations(decorations_window_id, false)
+            .await
+          {
             log::warn!(
-              "[tao-ohos] set_window_decorations failed for window 0: {:?}",
+              "[tao-ohos] set_window_decorations failed for window {}: {:?}",
+              decorations_window_id,
               e
             );
           }
