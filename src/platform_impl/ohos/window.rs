@@ -167,6 +167,89 @@ pub(crate) static WINDOW_MIRRORS: std::sync::LazyLock<
   std::sync::Mutex<std::collections::HashMap<i64, std::sync::Weak<WindowStateMirror>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// A deferred window operation waiting for its target's UIAbility stage
+/// handshake (issue 7, doc/OHOS窗口遗留问题.md in the tauri repo): boxed so
+/// both plain futures ([`Window::spawn_or_queue`]) and non-future actions
+/// (set_inner_size's decor-watch send) share one queue. Mirrors wry's
+/// per-webview `pending_ops` (wry/src/ohos/mod.rs).
+type PendingWindowOp = Box<dyn FnOnce() + Send + 'static>;
+
+/// Window ops dispatched to a window before its creation handshake completes
+/// — the "Unknown OS sub-window" race window. Two gated populations: spawned
+/// UIAbility windows awaiting stage registration (issue 7), and Float
+/// sub-windows awaiting the ArkTS creation chain to settle (问题七附注; gated
+/// only when the ProcessInitializer capability handshake armed the Rust-side
+/// registry — a stale HAR keeps Float ops on the old fire-and-forget path).
+/// Keyed by OHOS window id, FIFO per window. Drained by the event loop
+/// ([`drain_ready_pending_window_ops`]) whenever the D7 registration waker or
+/// the Float settle waker fires, or inline by [`Window::dispatch_or_queue`]
+/// when registration lands between its ready-check and push (push-then-check,
+/// the same TOCTOU discipline as wry's pending_ops).
+static PENDING_WINDOW_OPS: std::sync::LazyLock<
+  std::sync::Mutex<std::collections::HashMap<i64, Vec<PendingWindowOp>>>,
+> = std::sync::LazyLock::new(|| {
+  std::sync::Mutex::new(std::collections::HashMap::new())
+});
+
+/// Event-loop drain (called on every MainEvent dispatch after a D7
+/// registration waker or Float settle waker wakes the loop): replay queued
+/// ops for every window whose creation handshake completed. Ready ids are
+/// collected under the queue lock and replayed outside it — each op
+/// self-spawns on the bridge executor and must not run with the lock held.
+///
+/// Note on ordering: replayed ops and fast-path ops dispatched after the
+/// handshake race on the bridge executor with no FIFO guarantee — same
+/// pre-existing limitation as the UIAbility queue (wry pending_ops parity).
+pub(crate) fn drain_ready_pending_window_ops() {
+  let ready: Vec<(i64, Vec<PendingWindowOp>)> = {
+    let mut map = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned");
+    let ids: Vec<i64> = map
+      .keys()
+      .filter(|id| openharmony_ability::is_window_ready(**id))
+      .copied()
+      .collect();
+    ids
+      .into_iter()
+      .filter_map(|id| map.remove(&id).map(|ops| (id, ops)))
+      .collect()
+  };
+  for (id, ops) in ready {
+    // info (not debug): this is the third leg of the creation-handshake
+    // evidence trio (register_pending_* → notify_*_registered → replay) —
+    // hilog's default INFO level must show it on device.
+    log::info!(
+      "[tao-ohos] replaying {} queued window op(s) for window {} (creation handshake registered)",
+      ops.len(),
+      id
+    );
+    for op in ops {
+      op();
+    }
+  }
+}
+
+/// Discard queued ops for a window whose tao handle is gone ([`Window::drop`]).
+/// Queued attribute ops die with the handle — the OS window outlives it on
+/// OHOS, but nobody is left to observe those attributes; this matches the
+/// pre-queue behavior where the dispatches simply failed.
+pub(crate) fn drop_pending_window_ops(window_id: i64) {
+  let ops = PENDING_WINDOW_OPS
+    .lock()
+    .expect("PENDING_WINDOW_OPS poisoned")
+    .remove(&window_id);
+  if let Some(ops) = ops {
+    // info: mirrors the replay log — makes the drop race (V5) observable
+    // instead of silent.
+    log::info!(
+      "[tao-ohos] dropped {} queued window op(s) for window {} (window handle dropped)",
+      ops.len(),
+      window_id
+    );
+  }
+}
+
 pub(crate) struct Window {
   app: OpenHarmonyApp,
   window_id: Option<i64>,
@@ -448,7 +531,18 @@ impl Window {
         ),
       };
       match create_os_window(params) {
-        Ok(id) => Some(id),
+        Ok(id) => {
+          // Float creation race (问题七附注): create_os_window opened a pending
+          // registry entry for this id (capability handshake permitting) before
+          // dispatching the TSFN; attach the event-loop waker NOW so the settle
+          // notify (notify_float_window_registered) wakes the loop and replays
+          // any ops queued against the pre-registration window. If the ArkTS
+          // chain already settled (synchronous pre-throw reject), the entry is
+          // gone and set_float_window_waker wakes anyway — the drain pass then
+          // finds this id ready and replays (review V2).
+          openharmony_ability::set_float_window_waker(id, el.app.create_waker());
+          Some(id)
+        }
         Err(e) => {
           log::error!(
             "[tao-ohos] create_os_window failed for Float window {:?}: {:?}",
@@ -529,7 +623,7 @@ impl Window {
       if let Some(ref client) = win.window_client {
         let client = client.clone();
         let decorations_window_id = window_id.unwrap_or(0);
-        win.runtime.spawn(async move {
+        win.spawn_or_queue(async move {
           if let Err(e) = client
             .set_window_decorations(decorations_window_id, false)
             .await
@@ -596,6 +690,55 @@ impl Window {
     })
   }
 
+  /// Dispatch a window op to the bridge executor, or queue it if the target
+  /// is still awaiting its creation handshake (issue 7 + Float race): ops
+  /// fired in that window reach ArkTS before `requireWindow` can find the
+  /// window and are silently dropped ("Unknown OS sub-window", or a silent
+  /// no-op for set-limits which does not go through requireWindow). Mirrors
+  /// wry's `dispatch_or_queue`.
+  ///
+  /// The fast path stays synchronous for every window that cannot race: the
+  /// main window (id 0) and unknown ids (UIAbility ids for a fresh tao
+  /// process, zombie ids) all read as ready. Float sub-windows are gated from
+  /// `create_os_window` until the ArkTS creation chain settles — but only
+  /// when the ProcessInitializer capability handshake armed the registry
+  /// (stale-HAR builds keep the old fire-and-forget fast path).
+  fn dispatch_or_queue(&self, op: PendingWindowOp) {
+    let Some(window_id) = self.window_id else {
+      return;
+    };
+    if openharmony_ability::is_window_ready(window_id) {
+      op();
+      return;
+    }
+    // Push-then-check (wry pending_ops TOCTOU): if the handshake flipped
+    // between the ready check above and this push, the settle waker already
+    // fired and no further wake is coming — drain this id now. The entry may
+    // already hold earlier queued ops, so drain it FIFO, not just this op.
+    let mut map = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned");
+    map.entry(window_id).or_default().push(op);
+    if openharmony_ability::is_window_ready(window_id) {
+      let ops = map.remove(&window_id).unwrap_or_default();
+      drop(map);
+      for op in ops {
+        op();
+      }
+    }
+  }
+
+  /// Future convenience over [`Self::dispatch_or_queue`]: the future is
+  /// inert until polled, so holding it in the queue is safe — it captures
+  /// the op's arguments as of call time and replays in FIFO order.
+  fn spawn_or_queue<F>(&self, fut: F)
+  where
+    F: std::future::Future<Output = ()> + Send + 'static,
+  {
+    let runtime = self.runtime.clone();
+    self.dispatch_or_queue(Box::new(move || runtime.spawn(fut)));
+  }
+
   /// Dispatch the cached min/max size constraints as one `setWindowLimits`
   /// call. OHOS writes all four slots atomically (0 = unlimited), so every
   /// constraints entry point (builder attrs in `new`,
@@ -623,7 +766,7 @@ impl Window {
     let min_h = self.min_inner_height.load(Ordering::Acquire) as i64;
     let max_w = self.max_inner_width.load(Ordering::Acquire) as i64;
     let max_h = self.max_inner_height.load(Ordering::Acquire) as i64;
-    self.runtime.spawn(async move {
+    self.spawn_or_queue(async move {
       if let Err(e) = client
         .set_window_limits(window_id, min_w, min_h, max_w, max_h)
         .await
@@ -716,7 +859,7 @@ impl Window {
       };
       let w = s.width as i64;
       let h = s.height as i64;
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.resize_inner_window(window_id, w, h).await {
           log::warn!(
             "[tao-ohos] set_inner_size NOT applied for window {}: resize-inner failed (precise decor unavailable): {:?}",
@@ -766,7 +909,7 @@ impl Window {
       };
       let x = physical.x as i64;
       let y = physical.y as i64;
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.move_window_to(window_id, x, y).await {
           log::warn!(
             "[tao-ohos] move_window_to failed for window {}: {:?}",
@@ -836,7 +979,7 @@ impl Window {
         return;
       };
       let title = title.to_string();
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_window_title(window_id, title).await {
           log::warn!(
             "[tao-ohos] set_window_title failed for window {}: {:?}",
@@ -868,7 +1011,7 @@ impl Window {
       if visibility {
         self.mirror.minimized.store(false, Ordering::Release);
         // TODO(A1): replace with AppControlExt::show_ability(env) when A1 adds the action
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.restore_window(window_id).await {
             log::warn!(
               "[tao-ohos] restore_window failed for window {}: {:?}",
@@ -887,7 +1030,7 @@ impl Window {
       } else {
         self.mirror.minimized.store(true, Ordering::Release);
         // TODO(A1): replace with AppControlExt::hide_ability(env) when A1 adds the action
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.minimize_window(window_id).await {
             log::warn!(
               "[tao-ohos] minimize_window failed for window {}: {:?}",
@@ -905,7 +1048,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_focus") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.focus_window(window_id).await {
           log::warn!(
             "set_focus: focus_window failed for window {}: {:?}",
@@ -927,7 +1070,7 @@ impl Window {
         let Some(client) = self.bridge_client("set_focusable") else {
           return;
         };
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.set_window_focusable(window_id, focusable).await {
             log::warn!(
               "set_focusable: set_window_focusable failed for window {}: {:?}",
@@ -952,7 +1095,7 @@ impl Window {
       let Some(client) = self.bridge_client("close") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.destroy_window(window_id).await {
           log::warn!(
             "close: destroy_window failed for window {}: {:?}",
@@ -1035,7 +1178,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_decoration_flag") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client
           .set_window_decoration_flags(window_id, flags as i32)
           .await
@@ -1064,7 +1207,7 @@ impl Window {
         return;
       };
       if minimized {
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.minimize_window(window_id).await {
             log::warn!(
               "[tao-ohos] minimize_window failed for window {}: {:?}",
@@ -1074,7 +1217,7 @@ impl Window {
           }
         });
       } else {
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.restore_window(window_id).await {
             log::warn!(
               "[tao-ohos] restore_window failed for window {}: {:?}",
@@ -1105,7 +1248,7 @@ impl Window {
         return;
       };
       if maximized {
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.maximize_window(window_id).await {
             log::warn!(
               "[tao-ohos] maximize_window failed for window {}: {:?}",
@@ -1116,7 +1259,7 @@ impl Window {
         });
       } else {
         // recover() switches MAXIMIZE/FULL_SCREEN → FLOATING (API7+, public)
-        self.runtime.spawn(async move {
+        self.spawn_or_queue(async move {
           if let Err(e) = client.recover_window(window_id).await {
             log::warn!(
               "[tao-ohos] recover_window failed for window {}: {:?}",
@@ -1155,7 +1298,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_fullscreen") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_fullscreen(window_id, on).await {
           log::warn!(
             "[tao-ohos] set_fullscreen failed for window {}: {:?}",
@@ -1187,7 +1330,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_decorations") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_window_decorations(window_id, decorations).await {
           log::warn!(
             "[tao-ohos] set_window_decorations failed for window {}: {:?}",
@@ -1211,7 +1354,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_always_on_top") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_window_topmost(window_id, always_on_top).await {
           log::warn!(
             "[tao-ohos] set_window_topmost failed for window {}: {:?}",
@@ -1236,7 +1379,7 @@ impl Window {
       };
       let x = p.x as i64;
       let y = p.y as i64;
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_ime_position(window_id, x, y).await {
           log::warn!(
             "[tao-ohos] set_ime_position failed for window {}: {:?}",
@@ -1286,7 +1429,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_cursor_icon") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_cursor_icon(window_id, style).await {
           log::warn!(
             "[tao-ohos] set_cursor_icon failed for window {}: {:?}",
@@ -1332,7 +1475,7 @@ impl Window {
         ));
       }
     };
-    self.runtime.spawn(async move {
+    self.spawn_or_queue(async move {
       match client.get_real_window_id(window_id).await {
         Ok(real_id) => {
           if let Err(e) = set_cursor_grab(real_id as i32, grab) {
@@ -1413,7 +1556,7 @@ impl Window {
       let Some(client) = self.bridge_client("request_user_attention") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.request_user_attention(window_id).await {
           log::warn!(
             "[tao-ohos] request_user_attention failed for window {}: {:?}",
@@ -1447,7 +1590,7 @@ impl Window {
     // the facade client passes `touchable` through verbatim. See design D4 mapping table.
     if let Some(ref client) = self.window_client {
       let client = client.clone();
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_window_touchable(window_id, !ignore).await {
           warn!(
             "set_ignore_cursor_events: set_window_touchable failed for window {}: {:?}",
@@ -1516,7 +1659,7 @@ impl Window {
       let Some(client) = self.bridge_client("drag_resize_window") else {
         return Ok(());
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_window_draggable(window_id, true).await {
           log::warn!(
             "[tao-ohos] set_window_draggable(true) failed for window {}: {:?}",
@@ -1546,7 +1689,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_background_color") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client
           .set_window_background_color(window_id, color_u32)
           .await
@@ -1676,6 +1819,12 @@ impl Drop for Window {
       if let Ok(mut rects) = LAST_DISPATCHED_RECTS.lock() {
         rects.remove(&window_id);
       }
+      // Issue 7: discard ops still queued against this window (its creation
+      // handshake never completed before the handle went away), and drop the
+      // Float pending-registry entry so a late settle notify no-ops instead
+      // of waking a dead id.
+      drop_pending_window_ops(window_id);
+      openharmony_ability::unregister_pending_float(window_id);
     }
   }
 }

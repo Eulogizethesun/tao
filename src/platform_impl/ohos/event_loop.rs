@@ -22,7 +22,7 @@ use crate::window::{self, Theme};
 
 use super::keycodes::{to_location, to_logical, to_physical};
 use super::monitor::MonitorHandle;
-use super::window::{WindowId, WINDOW_MIRRORS};
+use super::window::{drain_ready_pending_window_ops, WindowId, WINDOW_MIRRORS};
 
 pub(crate) static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
 
@@ -842,6 +842,11 @@ impl<T: 'static> EventLoop<T> {
           }
         }
       }
+
+      // Issue 7: replay window ops queued against spawned UIAbility windows
+      // whose stage handshake completed since the last pass (the D7
+      // registration waker wakes the loop).
+      drain_ready_pending_window_ops();
 
       match event {
         MainEvent::SurfaceCreate { .. } => {
