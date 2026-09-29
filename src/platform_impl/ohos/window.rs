@@ -1612,9 +1612,15 @@ impl Drop for Window {
         .lock()
         .expect("WINDOW_MIRRORS poisoned")
         .remove(&window_id);
-      if let Ok(mut rects) = LAST_DISPATCHED_RECTS.lock() {
-        rects.remove(&window_id);
-      }
+      // Same poisoning policy as the ContentRectChange arm (issue
+      // Eulogizethesun/tauri#135): recover the map rather than skipping the
+      // remove — a skipped remove would leave a stale entry (harmless while
+      // window ids are monotonically allocated and never reused, but the
+      // consistency costs nothing).
+      LAST_DISPATCHED_RECTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&window_id);
     }
   }
 }
@@ -1638,7 +1644,10 @@ mod tests {
   // binary has no UIAbility/ArkTS window, so an ohos `Window` cannot be
   // constructed outside a bridge session, and the chrome arithmetic itself
   // sits on the ArkTS side (openharmony-ability WindowPlugin.ets
-  // resize-inner).
+  // resize-inner). The three cases by exact test name:
+  // - 'window.setInnerSize actually resizes (main window)'
+  // - 'window.setInnerSize save/restore zero drift (5 rounds)'
+  // - 'float window setInnerSize exact readback (decor=0)'
   #[test]
   fn rgba_to_ohos_color_transparent_returns_transparent_black() {
     assert_eq!(rgba_to_ohos_color(true, None), Some(0x00000000));
