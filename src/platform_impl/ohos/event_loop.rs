@@ -1123,7 +1123,9 @@ impl<T: 'static> EventLoop<T> {
         // even when no URI is provided.
         //
         // Impact on other consumers:
-        // - deep-link plugin: gated with #[cfg(any(macos, ios))], not affected on OHOS
+        // - deep-link plugin: has an OHOS arm — its on_event handler writes the
+        //   app-level current URL here (empty urls are ignored on OHOS), which
+        //   is the warm re-entry refresh path for get_current()
         // - other consumers: typically just log the urls, no functional side effects
         MainEvent::NewWant { uri } => {
           let urls = if uri.is_empty() {

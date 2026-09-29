@@ -1287,7 +1287,7 @@ impl Window {
   pub fn set_fullscreen(&self, monitor: Option<Fullscreen>) {
     // Delegate to the WindowClient bridge facade (plugin-window). `on=true`
     // enters an immersive fullscreen (setWindowLayoutFullScreen(true) + hide
-    // system bars); `on=false` reverses it. Dispatched via `runtime.spawn` —
+    // system bars); `on=false` reverses it. Dispatched via `spawn_or_queue` —
     // fire-and-forget at the JS level (the ArkTS handler returns after kicking
     // off async Promises), so it does not block the main thread. Replaces the
     // legacy synchronous `set_fullscreen` NAPI call which went through the dead
