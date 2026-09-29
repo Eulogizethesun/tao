@@ -169,15 +169,14 @@ pub(crate) static WINDOW_MIRRORS: std::sync::LazyLock<
 
 /// A deferred window operation waiting for its target's UIAbility stage
 /// handshake (issue 7, doc/OHOS窗口遗留问题.md in the tauri repo): boxed so
-/// both plain futures ([`Window::spawn_or_queue`]) and non-future actions
-/// (set_inner_size's decor-watch send) share one queue. Mirrors wry's
-/// per-webview `pending_ops` (wry/src/ohos/mod.rs).
+/// plain futures ([`Window::spawn_or_queue`]) and non-future actions share
+/// one queue. Mirrors wry's per-webview `pending_ops` (wry/src/ohos/mod.rs).
 type PendingWindowOp = Box<dyn FnOnce() + Send + 'static>;
 
 /// Window ops dispatched to a window before its creation handshake completes
 /// — the "Unknown OS sub-window" race window. Two gated populations: spawned
 /// UIAbility windows awaiting stage registration (issue 7), and Float
-/// sub-windows awaiting the ArkTS creation chain to settle (问题七附注; gated
+/// sub-windows awaiting the ArkTS creation chain to settle (issue-7 addendum; gated
 /// only when the ProcessInitializer capability handshake armed the Rust-side
 /// registry — a stale HAR keeps Float ops on the old fire-and-forget path).
 /// Keyed by OHOS window id, FIFO per window. Drained by the event loop
@@ -486,6 +485,15 @@ impl Window {
               window_id,
               e
             );
+            // Roll back the pre-registered pending entry (G15): the
+            // ability-destroy callback never fires for a spawn that failed,
+            // so is_window_ready would stay false forever and every op
+            // queued for this window would be held silently. Unregister
+            // BEFORE dropping the queued ops: an unknown id reads as ready,
+            // so an op racing in between dispatches immediately (bridge
+            // call fails with a warn) instead of being stranded forever.
+            openharmony_ability::unregister_pending_ui_ability(window_id);
+            drop_pending_window_ops(window_id);
           }
         });
         Some(window_id)
@@ -532,7 +540,7 @@ impl Window {
       };
       match create_os_window(params) {
         Ok(id) => {
-          // Float creation race (问题七附注): create_os_window opened a pending
+          // Float creation race (issue-7 addendum): create_os_window opened a pending
           // registry entry for this id (capability handshake permitting) before
           // dispatching the TSFN; attach the event-loop waker NOW so the settle
           // notify (notify_float_window_registered) wakes the loop and replays
@@ -645,7 +653,7 @@ impl Window {
     if window_attrs.content_protection && openharmony_ability::sdk_api_version() >= 15 {
       if let Some(id) = window_id {
         if let Some(client) = win.bridge_client("set_content_protection") {
-          win.runtime.spawn(async move {
+          win.spawn_or_queue(async move {
             match client.get_real_window_id(id).await {
               Ok(real_id) => {
                 if let Err(e) = set_window_privacy_mode(real_id as i32, true) {
@@ -1136,7 +1144,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_resizable") else {
         return;
       };
-      self.runtime.spawn(async move {
+      self.spawn_or_queue(async move {
         if let Err(e) = client.set_resize_by_drag(window_id, resizable).await {
           log::warn!(
             "[tao-ohos] set_resize_by_drag({}) failed for window {}: {:?}",
@@ -1523,7 +1531,7 @@ impl Window {
     let Some(client) = self.bridge_client("set_content_protection") else {
       return;
     };
-    self.runtime.spawn(async move {
+    self.spawn_or_queue(async move {
       match client.get_real_window_id(window_id).await {
         Ok(real_id) => {
           if let Err(e) = set_window_privacy_mode(real_id as i32, enabled) {
