@@ -996,20 +996,38 @@ impl<T: 'static> EventLoop<T> {
         }
         MainEvent::ConfigChanged { .. } => {
           // Configuration changes are app-level (EnvironmentCallback), not tied to a
-          // specific window. Keep window_id = 0 (main window).
+          // specific window. Broadcast to every live window like ThemeChanged
+          // below (scale is app-global on OHOS; WINDOW_MIRRORS covers main +
+          // spawned UIAbility + Float sub-windows, with a window-0 fallback
+          // before any window exists). Each window gets its own
+          // `new_inner_size` slot so one handler's adjustment cannot leak
+          // into the next window's event; the size value itself is
+          // app-level (`content_rect` is the primary's single Rect — NG7),
+          // so every window receives the primary-derived geometry.
           let size = app.content_rect();
           let scale = app.scale();
-          let mut size = PhysicalSize::new(size.width as _, size.height as _);
-          call_event_handler!(
-            event_loop_cell,
-            event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
-              event: event::WindowEvent::ScaleFactorChanged {
-                new_inner_size: &mut size,
-                scale_factor: scale as _,
-              },
-            }
-          );
+          let window_ids: Vec<i64> = WINDOW_MIRRORS
+            .lock()
+            .map(|mirrors| mirrors.keys().copied().collect())
+            .unwrap_or_default();
+          let window_ids = if window_ids.is_empty() {
+            vec![0]
+          } else {
+            window_ids
+          };
+          for wid in window_ids {
+            let mut size = PhysicalSize::new(size.width as _, size.height as _);
+            call_event_handler!(
+              event_loop_cell,
+              event::Event::WindowEvent {
+                window_id: window::WindowId(WindowId(wid)),
+                event: event::WindowEvent::ScaleFactorChanged {
+                  new_inner_size: &mut size,
+                  scale_factor: scale as _,
+                },
+              }
+            );
+          }
           // Issue Eulogizethesun/tauri#108: onConfigurationUpdate → ConfigChanged
           // carries the new colorMode (app.config() is already updated by the
           // lifecycle closure before dispatch), but ThemeChanged was never

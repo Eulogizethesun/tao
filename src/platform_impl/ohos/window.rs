@@ -229,9 +229,11 @@ pub(crate) fn drain_ready_pending_window_ops() {
   }
 }
 
-/// Discard queued ops for a window whose tao handle is gone ([`Window::drop`]).
-/// Queued attribute ops die with the handle — the OS window outlives it on
-/// OHOS, but nobody is left to observe those attributes; this matches the
+/// Discard queued ops for a window whose tao handle is gone ([`Window::drop`])
+/// or whose spawn was rolled back (the start_ui_ability Err leg — the handle
+/// still lives there, but the id must never settle). Queued attribute ops die
+/// with the window either way — the OS window outlives the handle on OHOS,
+/// but nobody is left to observe those attributes; this matches the
 /// pre-queue behavior where the dispatches simply failed.
 pub(crate) fn drop_pending_window_ops(window_id: i64) {
   let ops = PENDING_WINDOW_OPS
@@ -240,9 +242,10 @@ pub(crate) fn drop_pending_window_ops(window_id: i64) {
     .remove(&window_id);
   if let Some(ops) = ops {
     // info: mirrors the replay log — makes the drop race (V5) observable
-    // instead of silent.
+    // instead of silent. The reason is deliberately generic: this runs on
+    // both the handle-drop leg and the spawn-rollback Err leg.
     log::info!(
-      "[tao-ohos] dropped {} queued window op(s) for window {} (window handle dropped)",
+      "[tao-ohos] dropped {} queued window op(s) for window {} (handle dropped or spawn rolled back)",
       ops.len(),
       window_id
     );
@@ -455,6 +458,23 @@ impl Window {
         // (WebViewBuilder on the existing DefaultXComponent).
         Some(0)
       } else {
+        // OHOS form-factor gate (design.md OQ1: the mobile entry template
+        // stays singleton, no onAcceptWant). On a mobile-form build the
+        // spawn want would be routed back to the existing primary instance
+        // (onNewWant) — AMS reports no error, the new instance's
+        // onWindowStageCreate never fires, and the pending entry below
+        // would never resolve: every op queued for this window held
+        // silently forever, on a leg covered by neither the sync Err
+        // rollback nor notify_ui_ability_start_failed. Fail fast instead,
+        // before any registry state is opened. This also enforces what
+        // `supports_multiple_windows()` already declares (OHOS: desktop
+        // only) on the actual creation path.
+        if !openharmony_ability::is_desktop_form() {
+          log::error!(
+            "[tao-ohos] spawning an additional UIAbility window is only supported on the desktop (PC/2in1) form — this is a mobile-form build"
+          );
+          return Err(os_error!(OsError));
+        }
         // Subsequent UIAbility window: spawn a new EntryAbility instance via
         // startAbility carrying this pre-allocated id (design D1). Window::new
         // does NOT wait for the handshake (D7): register the pending ability
@@ -462,16 +482,42 @@ impl Window {
         // want fire-and-forget on the bridge executor (HC-5: no block_on),
         // and return immediately — wry queues webview ops for this id in its
         // pending_ops queue until the instance registers its stage.
-        let window_id = openharmony_ability::next_window_id();
-        openharmony_ability::register_pending_ui_ability(window_id);
-        openharmony_ability::set_ui_ability_waker(window_id, el.app.create_waker());
         let label = pl_attrs
           .label
           .clone()
           .unwrap_or_else(|| window_attrs.title.clone());
-        // The webview URL is a wry attribute delivered after the stage
-        // registers (WebviewCreateRequest), not a want parameter (OQ5) — an
-        // empty url here only names the window for AMS-side bookkeeping.
+        // Validate BEFORE opening any handshake state: the ArkTS
+        // start-ui-ability handler rejects an empty label synchronously
+        // (AppControlPlugin.ets), but that rejection only surfaces on the
+        // async Err leg — by then `Window::new` has already returned a live
+        // handle whose every op fails at the bridge (a zombie window). The
+        // tauri stack is immune (it validates labels non-empty itself);
+        // this guards raw-tao consumers with an empty title and no label.
+        if label.is_empty() {
+          log::error!(
+            "[tao-ohos] spawning a UIAbility window requires a non-empty label (or window title)"
+          );
+          return Err(os_error!(OsError));
+        }
+        let window_id = openharmony_ability::next_window_id();
+        // Capability handshake (G15, mirrors the Float registry's
+        // create_os_window gate): only open a pending entry when the ArkTS
+        // ProcessInitializer has armed UIAbility pending tracking. A stale
+        // HAR (fresh .so, cached ArkTS) never arms it — and
+        // `register_ui_ability_stage` ships in the same HAR generation as
+        // the arming call — so the spawn stays fire-and-forget
+        // (pre-registry semantics: an unknown id reads as ready) instead
+        // of queueing ops against an entry no ArkTS code would ever
+        // settle.
+        if openharmony_ability::ui_ability_pending_tracking_enabled() {
+          openharmony_ability::register_pending_ui_ability(window_id);
+          openharmony_ability::set_ui_ability_waker(window_id, el.app.create_waker());
+        }
+        // The webview URL is delivered after the stage registers
+        // (WebviewCreateRequest, OQ5). It is also mirrored into the want as
+        // `tauri_window_url` by the ArkTS start-ui-ability handler, but no
+        // reader consumes that key — tao always passes the empty string
+        // here, so the want parameter is bookkeeping/debug payload only.
         let url = String::new();
         let transparent = window_attrs.transparent;
         let app = el.app.clone();
@@ -490,7 +536,7 @@ impl Window {
               window_id,
               e
             );
-            // Roll back the pre-registered pending entry (G15): the
+            // Roll back the pending entry if one was opened (G15): the
             // ability-destroy callback never fires for a spawn that failed,
             // so is_window_ready would stay false forever and every op
             // queued for this window would be held silently. Unregister
