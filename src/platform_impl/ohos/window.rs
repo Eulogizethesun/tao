@@ -306,10 +306,12 @@ pub(crate) struct Window {
 
 // Upstream PR#20 window-type constants (ArkTS WindowType). UIAbility windows
 // (both the primary EntryAbility window and multi-UIAbility spawned windows —
-// that path is ported, see `Window::new`) carry no `window_type`: they pass 0,
-// matching how the OS creates the bootstrap window, so `TypeMain` itself stays
-// unconstructed. Float sub-windows are the only constructors of an explicit
-// variant (`TypeFloat`). The remaining variants are kept for parity with
+// that path is ported, see `Window::new`) never construct a variant of this
+// enum: their creation path passes the literal 0 (which coincides with
+// `TypeApp`'s value — the enum has no "none" sentinel), matching how the OS
+// creates the bootstrap window, so `TypeMain` itself stays unconstructed.
+// Float sub-windows are the only constructors of an explicit variant
+// (`TypeFloat`). The remaining variants are kept for parity with
 // upstream.
 #[allow(dead_code)]
 enum OHOSWindowType {
@@ -729,26 +731,33 @@ impl Window {
     let mut map = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned");
-    // First push for this id (empty → non-empty) is the only observable
-    // symptom when a spawned startAbility is delayed or rejected by AMS
-    // (nothing else fires): log that leg once per queue lifetime, not per op
-    // (O10-3) — the replay/drop legs already log with the same prefix.
+    // First push for this id (empty → non-empty) is the creation-latency
+    // marker (O10-3): one warn per queue lifetime is expected while a
+    // spawned instance's handshake completes — a queue that is never
+    // replayed nor dropped is the anomaly. AMS outright rejection is
+    // covered by the ability-side rollback (notify_ui_ability_start_failed,
+    // ability#53 AF3); a silent wedge here means the start neither completed
+    // nor rolled back. Emitted after the lock is dropped so the logging
+    // backend never runs inside the queue's critical section.
     let entry = map.entry(window_id).or_default();
     let first_queued = entry.is_empty();
     entry.push(op);
+    let queued_len = entry.len();
+    let replay = if openharmony_ability::is_window_ready(window_id) {
+      map.remove(&window_id).unwrap_or_default()
+    } else {
+      Vec::new()
+    };
+    drop(map);
     if first_queued {
       log::warn!(
         "[tao-ohos] window {} not ready (creation handshake pending): {} window op(s) queued",
         window_id,
-        entry.len()
+        queued_len
       );
     }
-    if openharmony_ability::is_window_ready(window_id) {
-      let ops = map.remove(&window_id).unwrap_or_default();
-      drop(map);
-      for op in ops {
-        op();
-      }
+    for op in replay {
+      op();
     }
   }
 
@@ -1137,8 +1146,11 @@ impl Window {
   /// tell from this query which of its windows is focused and must track the
   /// focused window itself. The `Focused(bool)` window events ARE routed per
   /// window id (`GainedFocus`/`LostFocus` carry the transitioning instance's
-  /// id) — that is the per-window signal. tauri gates focus on the window
-  /// label above this layer and is unaffected.
+  /// id) — that is the per-window signal. tauri does not shield consumers
+  /// from this: its `get_focused_window()` returns the first window whose
+  /// `is_focused()` reads true, so in a focused multi-window app it resolves
+  /// to an arbitrary one of them (HashMap order) — track focus through the
+  /// per-window events instead.
   pub fn is_focused(&self) -> bool {
     HAS_FOCUS.load(Ordering::Relaxed)
   }
@@ -1945,15 +1957,21 @@ mod tests {
     // 1. Hold: a queued op stays unexecuted while the handshake is pending.
     openharmony_ability::register_pending_ui_ability(HELD_ID);
     assert!(!openharmony_ability::is_window_ready(HELD_ID));
-    let held_ran = Arc::new(AtomicBool::new(false));
-    let flag = held_ran.clone();
-    queue()
-      .entry(HELD_ID)
-      .or_default()
-      .push(Box::new(move || flag.store(true, Ordering::SeqCst)));
+    // Two ops with an order log so the FIFO claim is asserted, not just
+    // "some op ran".
+    let order: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    for step in 1..=2u32 {
+      let order = order.clone();
+      queue()
+        .entry(HELD_ID)
+        .or_default()
+        .push(Box::new(move || {
+          order.lock().expect("order log poisoned").push(step);
+        }));
+    }
     drain_ready_pending_window_ops();
     assert!(
-      !held_ran.load(Ordering::SeqCst),
+      order.lock().expect("order log poisoned").is_empty(),
       "op ran while the creation handshake was pending"
     );
     assert!(
@@ -1962,13 +1980,15 @@ mod tests {
     );
 
     // 2. Replay: the handshake completing (registerUIAbilityStage) makes the
-    //    id ready and the next drain replays and empties its queue.
+    //    id ready and the next drain replays in FIFO order and empties its
+    //    queue.
     openharmony_ability::register_ui_ability_stage(HELD_ID);
     assert!(openharmony_ability::is_window_ready(HELD_ID));
     drain_ready_pending_window_ops();
-    assert!(
-      held_ran.load(Ordering::SeqCst),
-      "op not replayed after handshake"
+    assert_eq!(
+      *order.lock().expect("order log poisoned"),
+      vec![1, 2],
+      "queued ops not replayed in FIFO order"
     );
     assert!(!queue().contains_key(&HELD_ID), "drained entry not removed");
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
