@@ -457,10 +457,16 @@ impl<T: 'static> EventLoop<T> {
                 }
               };
               if changed {
+                // Route by the same event source's window id as the
+                // KeyboardInput dispatch below (Phase 4 design.md D5): the
+                // modifier state itself is app-level, but the transition
+                // notification belongs to the window that received the key,
+                // so a spawned UIAbility's modifier press must not land on
+                // the main window (O10-1).
                 call_event_handler!(
                   event_loop_cell,
                   event::Event::WindowEvent {
-                    window_id: window::WindowId(WindowId(0)),
+                    window_id,
                     event: event::WindowEvent::ModifiersChanged(*modifiers),
                   }
                 );

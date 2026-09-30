@@ -304,10 +304,13 @@ pub(crate) struct Window {
   max_inner_height: AtomicU32,
 }
 
-// Upstream PR#20 window-type constants (ArkTS WindowType). Only TypeFloat is
-// constructed today — the UIAbility main window needs no window_type, and the
-// multi-UIAbility (TypeMain) path is not ported — but the full mapping is kept
-// for parity with upstream.
+// Upstream PR#20 window-type constants (ArkTS WindowType). UIAbility windows
+// (both the primary EntryAbility window and multi-UIAbility spawned windows —
+// that path is ported, see `Window::new`) carry no `window_type`: they pass 0,
+// matching how the OS creates the bootstrap window, so `TypeMain` itself stays
+// unconstructed. Float sub-windows are the only constructors of an explicit
+// variant (`TypeFloat`). The remaining variants are kept for parity with
+// upstream.
 #[allow(dead_code)]
 enum OHOSWindowType {
   TypeApp = 0,
@@ -726,7 +729,20 @@ impl Window {
     let mut map = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned");
-    map.entry(window_id).or_default().push(op);
+    // First push for this id (empty → non-empty) is the only observable
+    // symptom when a spawned startAbility is delayed or rejected by AMS
+    // (nothing else fires): log that leg once per queue lifetime, not per op
+    // (O10-3) — the replay/drop legs already log with the same prefix.
+    let entry = map.entry(window_id).or_default();
+    let first_queued = entry.is_empty();
+    entry.push(op);
+    if first_queued {
+      log::warn!(
+        "[tao-ohos] window {} not ready (creation handshake pending): {} window op(s) queued",
+        window_id,
+        entry.len()
+      );
+    }
     if openharmony_ability::is_window_ready(window_id) {
       let ops = map.remove(&window_id).unwrap_or_default();
       drop(map);
@@ -1115,6 +1131,14 @@ impl Window {
     }
   }
 
+  /// Whether the app holds focus — an app-level (per-UIAbility-stage) bit,
+  /// NOT per-window (O10-5): on multi-UIAbility OHOS builds every `Window`
+  /// instance reads the same `HAS_FOCUS` flag, so a raw-tao consumer cannot
+  /// tell from this query which of its windows is focused and must track the
+  /// focused window itself. The `Focused(bool)` window events ARE routed per
+  /// window id (`GainedFocus`/`LostFocus` carry the transitioning instance's
+  /// id) — that is the per-window signal. tauri gates focus on the window
+  /// label above this layer and is unaffected.
   pub fn is_focused(&self) -> bool {
     HAS_FOCUS.load(Ordering::Relaxed)
   }
@@ -1893,6 +1917,78 @@ mod tests {
       rgba_to_ohos_color(false, Some((0, 0, 0, 0))),
       Some(0x00000000)
     );
+  }
+
+  // O10-6: PENDING_WINDOW_OPS lifecycle — hold while the creation handshake is
+  // pending, FIFO replay once it completes, discard on handle drop. The
+  // enqueue leg replicates dispatch_or_queue's one-line push (a `Window`
+  // cannot be constructed outside a bridge session, per the note above); the
+  // drain, the drop and the readiness registry are the real production code.
+  // Sentinel ids far above any real OHOS windowId / NEXT_WINDOW_ID counter
+  // value keep the static registries collision-free under parallel tests.
+  #[test]
+  fn pending_window_ops_hold_replay_and_drop() {
+    const HELD_ID: i64 = i64::MAX - 1;
+    const DROPPED_ID: i64 = i64::MAX - 2;
+    let queue = || {
+      PENDING_WINDOW_OPS
+        .lock()
+        .expect("PENDING_WINDOW_OPS poisoned")
+    };
+    // Idempotent reset so a previously failed run cannot leak registry
+    // entries that would pin these ids as "not ready".
+    openharmony_ability::unregister_pending_ui_ability(HELD_ID);
+    openharmony_ability::unregister_pending_ui_ability(DROPPED_ID);
+    drop_pending_window_ops(HELD_ID);
+    drop_pending_window_ops(DROPPED_ID);
+
+    // 1. Hold: a queued op stays unexecuted while the handshake is pending.
+    openharmony_ability::register_pending_ui_ability(HELD_ID);
+    assert!(!openharmony_ability::is_window_ready(HELD_ID));
+    let held_ran = Arc::new(AtomicBool::new(false));
+    let flag = held_ran.clone();
+    queue()
+      .entry(HELD_ID)
+      .or_default()
+      .push(Box::new(move || flag.store(true, Ordering::SeqCst)));
+    drain_ready_pending_window_ops();
+    assert!(
+      !held_ran.load(Ordering::SeqCst),
+      "op ran while the creation handshake was pending"
+    );
+    assert!(
+      queue().contains_key(&HELD_ID),
+      "queue dropped the op while the handshake was pending"
+    );
+
+    // 2. Replay: the handshake completing (registerUIAbilityStage) makes the
+    //    id ready and the next drain replays and empties its queue.
+    openharmony_ability::register_ui_ability_stage(HELD_ID);
+    assert!(openharmony_ability::is_window_ready(HELD_ID));
+    drain_ready_pending_window_ops();
+    assert!(
+      held_ran.load(Ordering::SeqCst),
+      "op not replayed after handshake"
+    );
+    assert!(!queue().contains_key(&HELD_ID), "drained entry not removed");
+    openharmony_ability::unregister_pending_ui_ability(HELD_ID);
+
+    // 3. Drop: ops still queued for a handle that went away are discarded
+    //    without running (Window::drop leg).
+    openharmony_ability::register_pending_ui_ability(DROPPED_ID);
+    let dropped_ran = Arc::new(AtomicBool::new(false));
+    let flag = dropped_ran.clone();
+    queue()
+      .entry(DROPPED_ID)
+      .or_default()
+      .push(Box::new(move || flag.store(true, Ordering::SeqCst)));
+    drop_pending_window_ops(DROPPED_ID);
+    assert!(!dropped_ran.load(Ordering::SeqCst), "dropped op ran");
+    assert!(
+      !queue().contains_key(&DROPPED_ID),
+      "dropped entry not removed"
+    );
+    openharmony_ability::unregister_pending_ui_ability(DROPPED_ID);
   }
 }
 
