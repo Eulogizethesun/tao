@@ -490,9 +490,12 @@ impl Window {
         // start-ui-ability handler rejects an empty label synchronously
         // (AppControlPlugin.ets), but that rejection only surfaces on the
         // async Err leg — by then `Window::new` has already returned a live
-        // handle whose every op fails at the bridge (a zombie window). The
-        // tauri stack is immune (it validates labels non-empty itself);
-        // this guards raw-tao consumers with an empty title and no label.
+        // handle whose every op fails at the bridge (a zombie window). Note
+        // the tauri stack is NOT immune: tauri core only validates label
+        // uniqueness (WindowLabelAlreadyExists, no is_empty check) and
+        // runtime-wry forwards the label verbatim, so an explicitly empty
+        // label reaches this point through tauri too — THIS guard is the
+        // only empty-label interception in the whole stack.
         if label.is_empty() {
           log::error!(
             "[tao-ohos] spawning a UIAbility window requires a non-empty label (or window title)"
