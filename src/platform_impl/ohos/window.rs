@@ -458,23 +458,6 @@ impl Window {
         // (WebViewBuilder on the existing DefaultXComponent).
         Some(0)
       } else {
-        // OHOS form-factor gate (design.md OQ1: the mobile entry template
-        // stays singleton, no onAcceptWant). On a mobile-form build the
-        // spawn want would be routed back to the existing primary instance
-        // (onNewWant) — AMS reports no error, the new instance's
-        // onWindowStageCreate never fires, and the pending entry below
-        // would never resolve: every op queued for this window held
-        // silently forever, on a leg covered by neither the sync Err
-        // rollback nor notify_ui_ability_start_failed. Fail fast instead,
-        // before any registry state is opened. This also enforces what
-        // `supports_multiple_windows()` already declares (OHOS: desktop
-        // only) on the actual creation path.
-        if !openharmony_ability::is_desktop_form() {
-          log::error!(
-            "[tao-ohos] spawning an additional UIAbility window is only supported on the desktop (PC/2in1) form — this is a mobile-form build"
-          );
-          return Err(os_error!(OsError));
-        }
         // Subsequent UIAbility window: spawn a new EntryAbility instance via
         // startAbility carrying this pre-allocated id (design D1). Window::new
         // does NOT wait for the handshake (D7): register the pending ability
@@ -486,6 +469,33 @@ impl Window {
           .label
           .clone()
           .unwrap_or_else(|| window_attrs.title.clone());
+        // OHOS form-factor gate (design.md OQ1: the mobile entry template
+        // stays singleton, no onAcceptWant). On a mobile-form build the
+        // spawn want would be routed back to the existing primary instance
+        // (onNewWant) — AMS reports no error, the new instance's
+        // onWindowStageCreate never fires, and the pending entry below
+        // would never resolve: every op queued for this window held
+        // silently forever, on a leg covered by neither the sync Err
+        // rollback nor notify_ui_ability_start_failed. Fail fast instead,
+        // before any registry state is opened. This also enforces what
+        // `supports_multiple_windows()` already declares (OHOS: desktop
+        // only) on the actual creation path.
+        //
+        // The Err is recorded under the label before returning: on the
+        // tauri stack runtime-wry's `Message::CreateWindow` dispatch has no
+        // reply channel (upstream design — it logs the error and returns
+        // Ok), so build() resolves Ok and the manager registers a
+        // label-only zombie window. `note_ui_ability_spawn_rejected` is the
+        // only surface the embedding app can consume
+        // (take_ui_ability_spawn_rejection) to report the mobile fail-fast
+        // at the tauri API layer. The label resolves BEFORE the gate for
+        // exactly this reason (runtime-wry always sets it via with_label).
+        if !openharmony_ability::is_desktop_form() {
+          const MOBILE_GATE_REASON: &str = "spawning an additional UIAbility window is only supported on the desktop (PC/2in1) form — this is a mobile-form build";
+          log::error!("[tao-ohos] {} (label={})", MOBILE_GATE_REASON, label);
+          openharmony_ability::note_ui_ability_spawn_rejected(&label, MOBILE_GATE_REASON);
+          return Err(os_error!(OsError));
+        }
         // Validate BEFORE opening any handshake state: the ArkTS
         // start-ui-ability handler rejects an empty label synchronously
         // (AppControlPlugin.ets), but that rejection only surfaces on the
