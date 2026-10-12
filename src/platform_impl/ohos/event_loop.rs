@@ -706,6 +706,16 @@ impl<T: 'static> EventLoop<T> {
     // an INACTIVE window receives no input events, so no stale
     // modifiers can leak while unfocused, and this regain-side
     // notification alone restores listener/tao consistency.
+    //
+    // Cross-window sticky-modifier limitation (tao#26 review follow-up):
+    // KEYBOARD_MODIFIERS is process-global, so the set tracked under the
+    // previously focused window stays live after it loses focus. When a
+    // (possibly different) window regains focus, that stale set is what it
+    // inherits — and if non-empty, this empty ModifiersChanged is the very
+    // first event the regaining window observes, before Focused(true) and
+    // every other observable event, whether or not it ever held those
+    // modifiers. Impact is near-zero: an unfocused window receives no
+    // input events, so nothing can act on the stale set before this reset.
     let had_modifiers = {
       let mut prev = ModifiersState::empty();
       if let Ok(mut modifiers) = KEYBOARD_MODIFIERS.lock() {
@@ -985,6 +995,15 @@ impl<T: 'static> EventLoop<T> {
         MainEvent::LostFocus { window_id } => {
           // Phase 4 (design.md D5): mirror of GainedFocus — route by the
           // losing instance's window id; HAS_FOCUS stays app-level.
+          //
+          // The modifier set is deliberately NOT cleared or dispatched here
+          // (rationale at handle_gained_focus): the process-global
+          // KEYBOARD_MODIFIERS keeps the losing window's set until the next
+          // GainedFocus dispatches the empty ModifiersChanged reset.
+          // Cross-window sticky-modifier limitation (tao#26 review
+          // follow-up): the stale set is only ever observable to — and
+          // corrected at — the next focus gainer; near-zero impact,
+          // declared for completeness.
           HAS_FOCUS.store(false, Ordering::Relaxed);
           call_event_handler!(
             event_loop_cell,

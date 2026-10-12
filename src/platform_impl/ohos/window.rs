@@ -436,10 +436,22 @@ impl Window {
     // app setup, before any command can race this swap.
     let is_first_window = !FIRST_WINDOW_CREATED.swap(true, Ordering::SeqCst);
     if is_first_window && !is_ui_ability_window {
-      // Roll back the latch: no window was created; a retry with a UIAbility
-      // window must still be able to bootstrap.
+      // Rejection semantics: an explicit Float request for the first window
+      // fails fast with Err here (this path silently continued before the
+      // D2 latch introduced the check). Roll back the latch: no window was
+      // created; a retry with a UIAbility window must still be able to
+      // bootstrap.
       FIRST_WINDOW_CREATED.store(false, Ordering::SeqCst);
       log::error!("the first OHOS window must be a UIAbility window (Float has no container to attach to)");
+      // Consumer caveat (tao#26 review follow-up): on the tauri stack this
+      // Err is swallowed by runtime-wry — the `Message::CreateWindow`
+      // dispatch has no reply channel (upstream design; it logs the error
+      // and returns Ok), so `build()` still resolves Ok and the manager
+      // registers a label-only zombie window, same shape as the mobile-gate
+      // note below. Unlike the mobile gate there is no
+      // note_ui_ability_spawn_rejected surface here — the log line above is
+      // the only trace — so consumers must know that the first window must
+      // be a UIAbility out of band.
       return Err(os_error!(OsError));
     }
 
@@ -526,6 +538,14 @@ impl Window {
           openharmony_ability::register_pending_ui_ability(window_id);
           openharmony_ability::set_ui_ability_waker(window_id, el.app.create_waker());
         }
+        // Geometry limitation (tao#26 review follow-up): WindowBuilder's
+        // `inner_size`/`position` are silently ignored on this
+        // spawned-UIAbility path — the startAbility want below carries only
+        // label/url/transparent, so the spawned stage is sized and placed
+        // by the OS defaults. (The Float branch below is the only creation
+        // path that consumes builder geometry, via WindowCreateParams.)
+        // Callers that need a specific size must `set_size` after the
+        // window is ready.
         // The webview URL is delivered after the stage registers
         // (WebviewCreateRequest, OQ5). It is also mirrored into the want as
         // `tauri_window_url` by the ArkTS start-ui-ability handler, but no
