@@ -1025,9 +1025,19 @@ impl<T: 'static> EventLoop<T> {
           // so every window receives the primary-derived geometry.
           let size = app.content_rect();
           let scale = app.scale();
+          // Skip dead mirrors (window dropped without running Drop): their
+          // events would only be dropped by the runtime-wry id lookup anyway,
+          // and the entries themselves are reaped lazily in the pending-
+          // status drain below.
           let window_ids: Vec<i64> = WINDOW_MIRRORS
             .lock()
-            .map(|mirrors| mirrors.keys().copied().collect())
+            .map(|mirrors| {
+              mirrors
+                .iter()
+                .filter(|(_, weak)| weak.strong_count() > 0)
+                .map(|(id, _)| *id)
+                .collect()
+            })
             .unwrap_or_default();
           let window_ids = if window_ids.is_empty() {
             vec![0]
@@ -1064,9 +1074,17 @@ impl<T: 'static> EventLoop<T> {
           };
           let prev_bits = LAST_EFFECTIVE_THEME.swap(theme_bits, Ordering::Relaxed);
           if prev_bits != theme_bits {
+            // Dead mirrors skipped — same filter as the ScaleFactorChanged
+            // broadcast above.
             let window_ids: Vec<i64> = WINDOW_MIRRORS
               .lock()
-              .map(|mirrors| mirrors.keys().copied().collect())
+              .map(|mirrors| {
+                mirrors
+                  .iter()
+                  .filter(|(_, weak)| weak.strong_count() > 0)
+                  .map(|(id, _)| *id)
+                  .collect()
+              })
               .unwrap_or_default();
             let window_ids = if window_ids.is_empty() {
               vec![0]

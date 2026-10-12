@@ -201,9 +201,14 @@ static PENDING_WINDOW_OPS: std::sync::LazyLock<
 /// pre-existing limitation as the UIAbility queue (wry pending_ops parity).
 pub(crate) fn drain_ready_pending_window_ops() {
   let ready: Vec<(i64, Vec<PendingWindowOp>)> = {
+    // Poison-tolerant like the ability-side registries this queue
+    // coordinates with (window/mod.rs recovers with into_inner): the
+    // critical section is Map ops + is_window_ready only, so a poisoned
+    // guard has nothing half-mutated worth aborting the event loop for —
+    // and a panic here would cross the NAPI/event-loop boundary.
     let mut map = PENDING_WINDOW_OPS
       .lock()
-      .expect("PENDING_WINDOW_OPS poisoned");
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ids: Vec<i64> = map
       .keys()
       .filter(|id| openharmony_ability::is_window_ready(**id))
@@ -238,7 +243,7 @@ pub(crate) fn drain_ready_pending_window_ops() {
 pub(crate) fn drop_pending_window_ops(window_id: i64) {
   let ops = PENDING_WINDOW_OPS
     .lock()
-    .expect("PENDING_WINDOW_OPS poisoned")
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
     .remove(&window_id);
   if let Some(ops) = ops {
     // info: mirrors the replay log — makes the drop race (V5) observable
@@ -809,7 +814,7 @@ impl Window {
     // already hold earlier queued ops, so drain it FIFO, not just this op.
     let mut map = PENDING_WINDOW_OPS
       .lock()
-      .expect("PENDING_WINDOW_OPS poisoned");
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
     // First push for this id (empty → non-empty) is the creation-latency
     // marker (O10-3): one warn per queue lifetime is expected while a
     // spawned instance's handshake completes — a queue that is never
@@ -1943,9 +1948,15 @@ impl Drop for Window {
         rects.remove(&window_id);
       }
       // Issue 7: discard ops still queued against this window (its creation
-      // handshake never completed before the handle went away), and drop the
-      // Float pending-registry entry so a late settle notify no-ops instead
-      // of waking a dead id.
+      // handshake never completed before the handle went away), recycle the
+      // UIAbility pending-registry entry (waker included — mirrors the
+      // start_ui_ability Err-leg rollback in `Window::new`; without it, an
+      // entry whose spawn AMS silently swallowed stays registered with a
+      // live waker until process exit), and drop the Float pending-registry
+      // entry so a late settle notify no-ops instead of waking a dead id.
+      // Both unregisters are idempotent no-ops for unknown ids (the primary
+      // window's id 0 was never registered as pending).
+      openharmony_ability::unregister_pending_ui_ability(window_id);
       drop_pending_window_ops(window_id);
       openharmony_ability::unregister_pending_float(window_id);
     }
