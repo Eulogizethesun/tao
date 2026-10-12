@@ -1761,6 +1761,33 @@ mod input_tests {
     assert!(evs[1].contains("loc=Left"), "{}", evs[1]);
     assert!(evs[2].contains("loc=Right"), "{}", evs[2]);
     assert!(evs[3].contains("loc=Numpad"), "{}", evs[3]);
+    // Routing (review F8): a modifier transition at a non-primary window id
+    // must dispatch both the ModifiersChanged and the key event to that id.
+    // Lives here — not in input_events_dispatch_with_originating_window_id —
+    // because this test already owns the KEYBOARD_MODIFIERS write discipline
+    // (a third parallel writer would flake the process-level static).
+    set_modifiers(ModifiersState::empty());
+    let route_ids: Arc<Mutex<Vec<window::WindowId>>> = Arc::new(Mutex::new(Vec::new()));
+    let route_sink = route_ids.clone();
+    let route_cell: LoopCell<()> = Arc::new(RefCell::new(Some(Box::new(
+      move |e: event::Event<()>| {
+        if let event::Event::WindowEvent { window_id, .. } = e {
+          route_sink.lock().unwrap().push(window_id);
+        }
+      },
+    ))));
+    EventLoop::<()>::handle_input_event(
+      &route_cell,
+      5,
+      &key(OhosKeyCode::ShiftLeft, Action::Down),
+    );
+    assert_eq!(
+      route_ids.lock().unwrap().clone(),
+      vec![
+        window::WindowId(WindowId(5)),
+        window::WindowId(WindowId(5)),
+      ]
+    );
     PRESSED_KEYS.with(|k| k.borrow_mut().clear());
     set_modifiers(ModifiersState::empty());
   }
@@ -1890,12 +1917,33 @@ mod input_tests {
         ..Default::default()
       }),
     );
+    // Review F8: cover the touch and key paths too (pointer id 2 ≠ window id
+    // 5, proving routing keys on the window id the event carries). Modifier
+    // keys route in key_location_for_modifier_pairs (serialized there for the
+    // KEYBOARD_MODIFIERS static); focus/close/destroy need a running loop and
+    // stay with the device suite.
+    let mut touch = TouchEventData {
+      event_type: TouchEvent::Down,
+      ..Default::default()
+    };
+    touch.touch_points = vec![TouchPointData {
+      id: 2,
+      x: 10.0,
+      y: 20.0,
+      force: 0.5,
+      event_type: TouchEvent::Down,
+      ..Default::default()
+    }];
+    EventLoop::<()>::handle_input_event(&cell, 5, &InputEvent::TouchEvent(touch));
+    EventLoop::<()>::handle_input_event(&cell, 5, &key(OhosKeyCode::A, Action::Down));
     assert_eq!(
       ids.lock().unwrap().clone(),
       vec![
         window::WindowId(WindowId(7)),
         window::WindowId(WindowId(7)),
         window::WindowId(WindowId(3)),
+        window::WindowId(WindowId(5)),
+        window::WindowId(WindowId(5)),
       ]
     );
   }
