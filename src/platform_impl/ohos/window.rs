@@ -446,17 +446,19 @@ impl Window {
       // D2 latch introduced the check). Roll back the latch: no window was
       // created; a retry with a UIAbility window must still be able to
       // bootstrap.
+      // Consumer caveat (tao#26 review follow-up, updated for the runtime-wry
+      // reply channel): this Err used to be swallowed by runtime-wry — the
+      // `Message::CreateWindow` dispatch had no reply channel (upstream
+      // design; it logged the error and returned Ok), so `build()` resolved
+      // Ok and the manager registered a label-only zombie window. On OHOS
+      // runtime-wry now replies with the creation outcome and propagates the
+      // failure (tauri PR of the coordinated set): `build()` rejects, no
+      // zombie registration. The log line above is retained for
+      // traceability. Unlike the mobile gate there is no
+      // note_ui_ability_spawn_rejected surface here — rejection is conveyed
+      // by the create call itself.
       FIRST_WINDOW_CREATED.store(false, Ordering::SeqCst);
       log::error!("the first OHOS window must be a UIAbility window (Float has no container to attach to)");
-      // Consumer caveat (tao#26 review follow-up): on the tauri stack this
-      // Err is swallowed by runtime-wry — the `Message::CreateWindow`
-      // dispatch has no reply channel (upstream design; it logs the error
-      // and returns Ok), so `build()` still resolves Ok and the manager
-      // registers a label-only zombie window, same shape as the mobile-gate
-      // note below. Unlike the mobile gate there is no
-      // note_ui_ability_spawn_rejected surface here — the log line above is
-      // the only trace — so consumers must know that the first window must
-      // be a UIAbility out of band.
       return Err(os_error!(OsError));
     }
 
@@ -498,15 +500,18 @@ impl Window {
         // `supports_multiple_windows()` already declares (OHOS: desktop
         // only) on the actual creation path.
         //
-        // The Err is recorded under the label before returning: on the
-        // tauri stack runtime-wry's `Message::CreateWindow` dispatch has no
-        // reply channel (upstream design — it logs the error and returns
-        // Ok), so build() resolves Ok and the manager registers a
-        // label-only zombie window. `note_ui_ability_spawn_rejected` is the
-        // only surface the embedding app can consume
-        // (take_ui_ability_spawn_rejection) to report the mobile fail-fast
-        // at the tauri API layer. The label resolves BEFORE the gate for
-        // exactly this reason (runtime-wry always sets it via with_label).
+        // The Err is recorded under the label before returning.
+        // note_ui_ability_spawn_rejected (consumable via
+        // take_ui_ability_spawn_rejection) predates the runtime-wry reply
+        // channel: back then the `Message::CreateWindow` dispatch had no
+        // reply channel (upstream design — it logged the error and returned
+        // Ok), so build() resolved Ok with a label-only zombie window and
+        // the note was the only surface reporting the mobile fail-fast at
+        // the tauri API layer. On OHOS the create call now propagates the
+        // Err as well (tauri PR of the coordinated set); the label-keyed
+        // note is kept as a durable record and for non-tauri embedders. The
+        // label resolves BEFORE the gate for exactly this reason
+        // (runtime-wry always sets it via with_label).
         if !openharmony_ability::is_desktop_form() {
           const MOBILE_GATE_REASON: &str = "spawning an additional UIAbility window is only supported on the desktop (PC/2in1) form — this is a mobile-form build";
           log::error!("[tao-ohos] {} (label={})", MOBILE_GATE_REASON, label);
@@ -543,14 +548,26 @@ impl Window {
           openharmony_ability::register_pending_ui_ability(window_id);
           openharmony_ability::set_ui_ability_waker(window_id, el.app.create_waker());
         }
-        // Geometry limitation (tao#26 review follow-up): WindowBuilder's
-        // `inner_size`/`position` are silently ignored on this
-        // spawned-UIAbility path — the startAbility want below carries only
-        // label/url/transparent, so the spawned stage is sized and placed
-        // by the OS defaults. (The Float branch below is the only creation
-        // path that consumes builder geometry, via WindowCreateParams.)
-        // Callers that need a specific size must `set_size` after the
-        // window is ready.
+        // Creation-time geometry (tao#26 review follow-up F5): the builder's
+        // `inner_size`/`position` (logical px) are converted to physical px
+        // and delivered through the startAbility StartOptions
+        // (`windowWidth`/`windowHeight`/`windowLeft`/`windowTop`, API 11+) so
+        // a spawned UIAbility window honors `.inner_size()/.position()`
+        // instead of falling back to the OS default sizing. StartOptions
+        // sizes the window rectangle (frame included) — same contract as the
+        // Float branch's WindowCreateParams below; a decorated window's frame
+        // eats into the content. Unspecified axes stay unset (OS default).
+        // The bootstrap main window (id 0) remains OS/ArkTS sized — apply
+        // `set_size` after ready there.
+        let spawn_scale = el.app.scale() as f64;
+        let inner_size = window_attrs
+          .inner_size
+          .map(|s| s.to_physical::<i32>(spawn_scale))
+          .map(|p| (p.width, p.height));
+        let position = window_attrs
+          .position
+          .map(|p| p.to_physical::<i32>(spawn_scale))
+          .map(|p| (p.x, p.y));
         // The webview URL is delivered after the stage registers
         // (WebviewCreateRequest, OQ5). It is also mirrored into the want as
         // `tauri_window_url` by the ArkTS start-ui-ability handler, but no
@@ -566,6 +583,8 @@ impl Window {
             label,
             url,
             transparent,
+            inner_size,
+            position,
           )
           .await
           {
