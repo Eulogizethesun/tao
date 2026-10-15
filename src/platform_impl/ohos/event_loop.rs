@@ -22,7 +22,7 @@ use crate::window::{self, Theme};
 
 use super::keycodes::{to_location, to_logical, to_physical};
 use super::monitor::MonitorHandle;
-use super::window::{WindowId, WINDOW_MIRRORS};
+use super::window::{drain_ready_pending_window_ops, WindowId, WINDOW_MIRRORS};
 
 pub(crate) static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
 
@@ -170,6 +170,30 @@ fn current_modifiers() -> ModifiersState {
     .unwrap_or_else(|poisoned| *poisoned.into_inner())
 }
 
+/// Live window ids from the mirror registry, with a window-0 fallback for
+/// the pre-first-window phase. Dead mirrors (window dropped without
+/// running `Drop`) are skipped — their events would only be dropped by
+/// the runtime-wry id lookup anyway, and the entries themselves are
+/// reaped lazily in the pending-status drain. Shared by the app-level
+/// broadcast arms (ConfigChanged's ScaleFactorChanged / ThemeChanged).
+fn live_window_ids() -> Vec<i64> {
+  let ids: Vec<i64> = WINDOW_MIRRORS
+    .lock()
+    .map(|mirrors| {
+      mirrors
+        .iter()
+        .filter(|(_, weak)| weak.strong_count() > 0)
+        .map(|(id, _)| *id)
+        .collect()
+    })
+    .unwrap_or_default();
+  if ids.is_empty() {
+    vec![0]
+  } else {
+    ids
+  }
+}
+
 /// Map an OHOS NDK MouseButton to tao's MouseButton.
 ///
 /// Returns `None` for `NoneButton` (no meaningful button to report).
@@ -197,7 +221,7 @@ macro_rules! call_event_handler {
   };
 }
 
-/// Emit a synthesized press+release key pair on the main window (id 0).
+/// Emit a synthesized press+release key pair on `window_id`.
 ///
 /// The IME handlers use this to mock physical key events where OHOS only
 /// reports IME-level facts: Backspace/Enter edits arrive as IME events (no
@@ -205,6 +229,7 @@ macro_rules! call_event_handler {
 /// engines commit their composition / fire blur.
 fn emit_synthetic_key<T: 'static>(
   event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
+  window_id: window::WindowId,
   logical_key: Key<'static>,
   physical_key: KeyCode,
 ) {
@@ -212,7 +237,7 @@ fn emit_synthetic_key<T: 'static>(
     call_event_handler!(
       event_loop_cell,
       event::Event::WindowEvent {
-        window_id: window::WindowId(WindowId(0)),
+        window_id,
         event: event::WindowEvent::KeyboardInput {
           device_id: event::DeviceId(DeviceId(0)),
           event: event::KeyEvent {
@@ -349,18 +374,21 @@ impl<T: 'static> EventLoop<T> {
   }
 
   // TODO: For input event, we need some real examples to test it
-  // Input events originate from the *main* window's XComponent (Float sub-windows do
-  // not own an XComponent / render surface). All input dispatch therefore uses
-  // window_id = 0 (main window). Phase 3 (design.md D6) only routes per-window for
-  // WindowResize / ContentRectChange; input remains main-window-scoped.
+  // Phase 4 (design.md D5): input events carry the window id of the render
+  // surface that produced them (from render()'s `window_id` param). Only the
+  // primary instance owns an XComponent (spawned UIAbility windows mount
+  // their webview through the WindowManager multi-root path and their content
+  // input is consumed by ArkWeb), so in practice this is 0 — the routing is
+  // plumbed from the source instead of hardcoded.
   fn handle_input_event(
     event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
+    window_id: i64,
     event: &InputEvent,
   ) {
+    let window_id = window::WindowId(WindowId(window_id));
     #[allow(unreachable_patterns)]
     match event {
       InputEvent::TouchEvent(motion_event) => {
-        let window_id = window::WindowId(WindowId(0));
         let device_id = event::DeviceId(DeviceId(motion_event.device_id as _));
         let action = motion_event.event_type;
 
@@ -400,10 +428,10 @@ impl<T: 'static> EventLoop<T> {
         }
       }
       InputEvent::MouseEvent(mouse_event) => {
-        Self::handle_mouse_event(event_loop_cell, mouse_event);
+        Self::handle_mouse_event(event_loop_cell, window_id, mouse_event);
       }
       InputEvent::AxisEvent(axis_event) => {
-        Self::handle_axis_event(event_loop_cell, axis_event);
+        Self::handle_axis_event(event_loop_cell, window_id, axis_event);
       }
       InputEvent::KeyEvent(key) => {
         let keycode = key.code;
@@ -453,10 +481,16 @@ impl<T: 'static> EventLoop<T> {
                 }
               };
               if changed {
+                // Route by the same event source's window id as the
+                // KeyboardInput dispatch below (Phase 4 design.md D5): the
+                // modifier state itself is app-level, but the transition
+                // notification belongs to the window that received the key,
+                // so a spawned UIAbility's modifier press must not land on
+                // the main window (O10-1).
                 call_event_handler!(
                   event_loop_cell,
                   event::Event::WindowEvent {
-                    window_id: window::WindowId(WindowId(0)),
+                    window_id,
                     event: event::WindowEvent::ModifiersChanged(*modifiers),
                   }
                 );
@@ -470,7 +504,7 @@ impl<T: 'static> EventLoop<T> {
           call_event_handler!(
             event_loop_cell,
             event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
+              window_id,
               event: event::WindowEvent::KeyboardInput {
                 device_id: event::DeviceId(DeviceId(key.device_id as _)),
                 event: event::KeyEvent {
@@ -493,7 +527,7 @@ impl<T: 'static> EventLoop<T> {
           call_event_handler!(
             event_loop_cell,
             event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
+              window_id,
               event: event::WindowEvent::ReceivedImeText(s.text.clone()),
             }
           );
@@ -501,17 +535,17 @@ impl<T: 'static> EventLoop<T> {
         ImeEvent::BackspaceEvent(_) => {
           // No physical key events exist for IME edits — mock Backspace so
           // web engines / GUI toolkits can react to the deletion.
-          emit_synthetic_key(event_loop_cell, Key::Backspace, KeyCode::Backspace);
+          emit_synthetic_key(event_loop_cell, window_id, Key::Backspace, KeyCode::Backspace);
         }
         ImeEvent::EnterEvent(_) => {
           // Same as Backspace: mock an Enter key press.
-          emit_synthetic_key(event_loop_cell, Key::Enter, KeyCode::Enter);
+          emit_synthetic_key(event_loop_cell, window_id, Key::Enter, KeyCode::Enter);
         }
         ImeEvent::ImeStatusEvent(s) => match s {
           KeyboardStatus::Hide => {
             // Mock an Enter key press so egui/web engines receive a key event
             // and trigger their onblur/commit behavior on keyboard hide.
-            emit_synthetic_key(event_loop_cell, Key::Enter, KeyCode::Enter);
+            emit_synthetic_key(event_loop_cell, window_id, Key::Enter, KeyCode::Enter);
           }
           _ => {
             warn!("Unknown openharmony_ability ime status event {s:?}")
@@ -525,11 +559,9 @@ impl<T: 'static> EventLoop<T> {
   }
 
   /// Handle mouse events from the OHOS NDK, converting them to tao WindowEvents.
-  fn handle_mouse_event(
-    event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
-    mouse_event: &MouseEventData,
-  ) {
-    let window_id = window::WindowId(WindowId(0));
+  /// `window_id` is the routed window (from the originating input event,
+  /// Phase 4 design.md D5).
+  fn handle_mouse_event(event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>, window_id: window::WindowId, mouse_event: &MouseEventData) {
     // Use device_id 0 for mouse, consistent across events.
     let device_id = event::DeviceId(DeviceId(0));
 
@@ -611,11 +643,9 @@ impl<T: 'static> EventLoop<T> {
   }
 
   /// Handle axis (scroll wheel) events from the OHOS ArkUI runtime.
-  fn handle_axis_event(
-    event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
-    axis_event: &AxisEventData,
-  ) {
-    let window_id = window::WindowId(WindowId(0));
+  /// `window_id` is the routed window (from the originating input event,
+  /// Phase 4 design.md D5).
+  fn handle_axis_event(event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>, window_id: window::WindowId, axis_event: &AxisEventData) {
     let device_id = event::DeviceId(DeviceId(0));
     let is_touchpad = axis_event.source_type == InputSourceType::Touchpad;
 
@@ -673,13 +703,15 @@ impl<T: 'static> EventLoop<T> {
     }
   }
 
-  /// Handle MainEvent::GainedFocus (app UIAbility stage event,
-  /// StageEventType::ACTIVE — not per-Float-sub-window; window_id = 0, the
-  /// main window): mark focus, clear the tracked modifier set, and dispatch
-  /// Focused(true). Extracted from the run_loop arm for direct testing
-  /// (Review R21 / issue Eulogizethesun/tauri#137).
+  /// Handle MainEvent::GainedFocus (a per-UIAbility-instance stage event,
+  /// StageEventType::ACTIVE — `window_id` is the gaining instance, 0 =
+  /// primary; Phase 4 design.md D5): mark focus, clear the tracked modifier
+  /// set, and dispatch Focused(true) routed to that window. Extracted from
+  /// the run_loop arm for direct testing (Review R21 / issue
+  /// Eulogizethesun/tauri#137).
   fn handle_gained_focus(
     event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
+    window_id: i64,
   ) {
     HAS_FOCUS.store(true, Ordering::Relaxed);
     // Modifier state is tracked from key events (issue #109); a window
@@ -695,9 +727,29 @@ impl<T: 'static> EventLoop<T> {
     //
     // The LOST-focus edge deliberately does NOT clear/dispatch
     // (unlike Windows lose_active_focus / macOS windowDidResignKey):
-    // an INACTIVE window receives no input events, so no stale
-    // modifiers can leak while unfocused, and this regain-side
-    // notification alone restores listener/tao consistency.
+    // the reset must be observable by the regaining window to restore
+    // listener/tao consistency, and this regain-side notification
+    // alone achieves that. Note (tao#26 review, second round): this is
+    // NOT justified by "an unfocused window receives no input" —
+    // mouse/axis pointer events are routed by SOURCE window with no
+    // focus filter and read the process-global current_modifiers(),
+    // so an unfocused window can still observe the stale set through
+    // the deprecated `modifiers` field (e.g. hover-delivered
+    // CursorMoved/scroll); only key events are focus-bound.
+    //
+    // Cross-window sticky-modifier limitation (tao#26 review follow-up):
+    // KEYBOARD_MODIFIERS is process-global, so the set tracked under the
+    // previously focused window stays live after it loses focus. When a
+    // (possibly different) window regains focus, that stale set is what it
+    // inherits — and if non-empty, this empty ModifiersChanged is the very
+    // first event on the focus path, before Focused(true), whether or not
+    // it ever held those modifiers. Residual exposure until that reset:
+    // pointer events landing on any window — focused or not — between the
+    // stale set's last update and the next GainedFocus report the stale
+    // set in their deprecated `modifiers` field. ModifiersChanged
+    // LISTENERS are unaffected (they only ever saw the events that built
+    // the set); the next GainedFocus's reset is the single correction
+    // point.
     let had_modifiers = {
       let mut prev = ModifiersState::empty();
       if let Ok(mut modifiers) = KEYBOARD_MODIFIERS.lock() {
@@ -710,7 +762,7 @@ impl<T: 'static> EventLoop<T> {
       call_event_handler!(
         event_loop_cell,
         event::Event::WindowEvent {
-          window_id: window::WindowId(WindowId(0)),
+          window_id: window::WindowId(WindowId(window_id)),
           event: event::WindowEvent::ModifiersChanged(ModifiersState::empty()),
         }
       );
@@ -718,7 +770,7 @@ impl<T: 'static> EventLoop<T> {
     call_event_handler!(
       event_loop_cell,
       event::Event::WindowEvent {
-        window_id: window::WindowId(WindowId(0)),
+        window_id: window::WindowId(WindowId(window_id)),
         event: event::WindowEvent::Focused(true),
       }
     );
@@ -841,6 +893,11 @@ impl<T: 'static> EventLoop<T> {
         }
       }
 
+      // Issue 7: replay window ops queued against spawned UIAbility windows
+      // whose stage handshake completed since the last pass (the D7
+      // registration waker wakes the loop).
+      drain_ready_pending_window_ops();
+
       match event {
         MainEvent::SurfaceCreate { .. } => {
           call_event_handler!(event_loop_cell, event::Event::NewEvents(StartCause::Init));
@@ -874,13 +931,14 @@ impl<T: 'static> EventLoop<T> {
             }
           );
         }
-        MainEvent::WindowRedraw { .. } => {
-          // RedrawRequested is driven by the XComponent frame callback, which is
-          // the *main* window's render surface only (Float sub-windows do not own
-          // an XComponent). Keep window_id = 0 (main window).
+        MainEvent::WindowRedraw { window_id, .. } => {
+          // RedrawRequested is driven by the XComponent frame callback, keyed
+          // by the window that called render() (Phase 4 design.md D5). In
+          // practice that is the primary only — spawned UIAbility windows
+          // and Float sub-windows own no XComponent.
           call_event_handler!(
             event_loop_cell,
-            event::Event::RedrawRequested(window::WindowId(WindowId(0)))
+            event::Event::RedrawRequested(window::WindowId(WindowId(window_id)))
           );
         }
         MainEvent::ContentRectChange(content_rect) => {
@@ -960,35 +1018,74 @@ impl<T: 'static> EventLoop<T> {
             _ => {}
           }
         }
-        MainEvent::GainedFocus => Self::handle_gained_focus(&event_loop_cell),
-        MainEvent::LostFocus => {
-          // Focus is an app-level UIAbility stage event (StageEventType::INACTIVE).
-          // Keep window_id = 0 (main window).
+        // Phase 4 (design.md D5): focus is a per-UIAbility-instance stage
+        // event — route by the gaining instance's window id so a spawned
+        // window's tauri Focused listeners fire. HAS_FOCUS stays a single
+        // app-level bit: when a spawned instance gains focus the primary
+        // receives the matching LostFocus half of the pair, keeping the
+        // bit in step; read sites are unchanged. The helper also performs
+        // the R21 stale-modifier reset (issue #137) before Focused(true).
+        MainEvent::GainedFocus { window_id } => Self::handle_gained_focus(&event_loop_cell, window_id),
+        MainEvent::LostFocus { window_id } => {
+          // Phase 4 (design.md D5): mirror of GainedFocus — route by the
+          // losing instance's window id; HAS_FOCUS stays app-level.
+          //
+          // The modifier set is deliberately NOT cleared or dispatched here
+          // (rationale at handle_gained_focus): the process-global
+          // KEYBOARD_MODIFIERS keeps the losing window's set until the next
+          // GainedFocus dispatches the empty ModifiersChanged reset.
+          // Cross-window sticky-modifier limitation (tao#26 review
+          // follow-up, second round): until that reset, pointer events
+          // routed by source window (hover/move/scroll, no focus filter)
+          // still report the stale set via the deprecated `modifiers`
+          // field — including on not-yet-refocused windows; the next
+          // focus gainer is the correction point.
           HAS_FOCUS.store(false, Ordering::Relaxed);
           call_event_handler!(
             event_loop_cell,
             event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
+              window_id: window::WindowId(WindowId(window_id)),
               event: event::WindowEvent::Focused(false),
             }
           );
         }
         MainEvent::ConfigChanged { .. } => {
           // Configuration changes are app-level (EnvironmentCallback), not tied to a
-          // specific window. Keep window_id = 0 (main window).
-          let size = app.content_rect();
+          // specific window. Broadcast to every live window like ThemeChanged
+          // below (scale is app-global on OHOS; WINDOW_MIRRORS covers main +
+          // spawned UIAbility + Float sub-windows, with a window-0 fallback
+          // before any window exists). Each window gets its own
+          // `new_inner_size` slot so one handler's adjustment cannot leak
+          // into the next window's event. The size is the window's OWN inner
+          // rect (`inner_rect_for`, the same source as the Resized dispatch
+          // in the ContentRectChange arm above — issue Eulogizethesun/tauri#97),
+          // not the primary's geometry broadcast to everyone: a spawned or
+          // Float window must be offered its own drawable size to resize to.
+          // Degradation: `inner_rect_for` returns (0,0,0,0) before a window's
+          // first readable windowRectChange, so fall back to the app-level
+          // content rect then (the same pre-geometry degradation the Resized
+          // path tolerates).
           let scale = app.scale();
-          let mut size = PhysicalSize::new(size.width as _, size.height as _);
-          call_event_handler!(
-            event_loop_cell,
-            event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
-              event: event::WindowEvent::ScaleFactorChanged {
-                new_inner_size: &mut size,
-                scale_factor: scale as _,
-              },
-            }
-          );
+          let app_rect = app.content_rect();
+          for wid in live_window_ids() {
+            let inner = app.inner_rect_for(wid);
+            let (width, height) = if inner.width > 0 && inner.height > 0 {
+              (inner.width, inner.height)
+            } else {
+              (app_rect.width, app_rect.height)
+            };
+            let mut size = PhysicalSize::new(width as _, height as _);
+            call_event_handler!(
+              event_loop_cell,
+              event::Event::WindowEvent {
+                window_id: window::WindowId(WindowId(wid)),
+                event: event::WindowEvent::ScaleFactorChanged {
+                  new_inner_size: &mut size,
+                  scale_factor: scale as _,
+                },
+              }
+            );
+          }
           // Issue Eulogizethesun/tauri#108: onConfigurationUpdate → ConfigChanged
           // carries the new colorMode (app.config() is already updated by the
           // lifecycle closure before dispatch), but ThemeChanged was never
@@ -1006,16 +1103,9 @@ impl<T: 'static> EventLoop<T> {
           };
           let prev_bits = LAST_EFFECTIVE_THEME.swap(theme_bits, Ordering::Relaxed);
           if prev_bits != theme_bits {
-            let window_ids: Vec<i64> = WINDOW_MIRRORS
-              .lock()
-              .map(|mirrors| mirrors.keys().copied().collect())
-              .unwrap_or_default();
-            let window_ids = if window_ids.is_empty() {
-              vec![0]
-            } else {
-              window_ids
-            };
-            for wid in window_ids {
+            // Live mirrors only — same filter as the ScaleFactorChanged
+            // broadcast above (`live_window_ids`).
+            for wid in live_window_ids() {
               call_event_handler!(
                 event_loop_cell,
                 event::Event::WindowEvent {
@@ -1051,19 +1141,22 @@ impl<T: 'static> EventLoop<T> {
           // TODO: This is incorrect - will be solved in https://github.com/rust-windowing/winit/pull/3897
           // self.running = false;
         }
-        MainEvent::WindowDestroy => {
-          // This fires from the UIAbility `onWindowStageDestroy` lifecycle callback,
-          // which corresponds to the *main* UIAbility window stage being torn down —
-          // not Float sub-windows (those are destroyed via the separate ArkTS
+        MainEvent::WindowDestroy { window_id } => {
+          // This fires from the UIAbility `onWindowStageDestroy` lifecycle
+          // callback, which corresponds to a UIAbility window stage being torn
+          // down. Under multi-UIAbility (openspec multi-uiability-windows)
+          // every UIAbility instance's destroy routes here with its own window
+          // id (Phase 4 design.md D5): the primary (0) keeps the historical
+          // close+destroy pair, a spawned instance's teardown reaches its own
+          // window so tauri-runtime-wry removes the store entry (D13 cleanup;
+          // its close path is idempotent against the already-terminating
+          // ability). Float sub-windows are destroyed via the separate ArkTS
           // destroyWindow() path drained by tauri-runtime-wry's
-          // drain_pending_window_closes()). UIAbility is a singleton (enforced by the
-          // UIABILITY_CREATED guard in Window::new), so at most one main window stage
-          // exists; this path dispatches CloseRequested + Destroyed for it.
-          // Keep window_id = 0 (main window).
+          // drain_pending_window_closes().
           call_event_handler!(
             event_loop_cell,
             event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
+              window_id: window::WindowId(WindowId(window_id)),
               event: event::WindowEvent::CloseRequested,
             }
           );
@@ -1071,7 +1164,7 @@ impl<T: 'static> EventLoop<T> {
           call_event_handler!(
             event_loop_cell,
             event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(0)),
+              window_id: window::WindowId(WindowId(window_id)),
               event: event::WindowEvent::Destroyed,
             }
           );
@@ -1091,8 +1184,8 @@ impl<T: 'static> EventLoop<T> {
           // the duration of this synchronous dispatch.
           call_event_handler!(event_loop_cell, event::Event::PrepareToTerminate { answer });
         }
-        MainEvent::Input(input_event) => {
-          Self::handle_input_event(&event_loop_cell, &input_event);
+        MainEvent::Input { window_id, input } => {
+          Self::handle_input_event(&event_loop_cell, window_id, &input);
         }
         // OHOS: intentionally diverges from Android/iOS — always emit Event::Opened
         // even when urls is empty.
@@ -1105,7 +1198,9 @@ impl<T: 'static> EventLoop<T> {
         // even when no URI is provided.
         //
         // Impact on other consumers:
-        // - deep-link plugin: gated with #[cfg(any(macos, ios))], not affected on OHOS
+        // - deep-link plugin: has an OHOS arm — its on_event handler writes the
+        //   app-level current URL here (empty urls are ignored on OHOS), which
+        //   is the warm re-entry refresh path for get_current()
         // - other consumers: typically just log the urls, no functional side effects
         MainEvent::NewWant { uri } => {
           let urls = if uri.is_empty() {
@@ -1345,6 +1440,7 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Move, OhosMouseButton::NoneButton),
       );
     });
@@ -1356,10 +1452,12 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Press, OhosMouseButton::LeftButton),
       );
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Release, OhosMouseButton::LeftButton),
       );
     });
@@ -1377,10 +1475,12 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Press, OhosMouseButton::BackButton),
       );
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Release, OhosMouseButton::ForwardButton),
       );
     });
@@ -1398,6 +1498,7 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::Press, OhosMouseButton::NoneButton),
       );
     });
@@ -1409,10 +1510,12 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::HoverEnter, OhosMouseButton::NoneButton),
       );
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::HoverLeave, OhosMouseButton::NoneButton),
       );
     });
@@ -1427,6 +1530,7 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_mouse_event(
         cell,
+        window::WindowId(WindowId(0)),
         &mouse(MouseAction::None, OhosMouseButton::NoneButton),
       );
     });
@@ -1445,7 +1549,7 @@ mod input_tests {
         source_type: InputSourceType::Mouse,
         ..Default::default()
       };
-      EventLoop::<()>::handle_axis_event(cell, &d);
+      EventLoop::<()>::handle_axis_event(cell, window::WindowId(WindowId(0)), &d);
     });
     assert_eq!(
       evs,
@@ -1463,7 +1567,7 @@ mod input_tests {
         source_type: InputSourceType::Touchpad,
         ..Default::default()
       };
-      EventLoop::<()>::handle_axis_event(cell, &d);
+      EventLoop::<()>::handle_axis_event(cell, window::WindowId(WindowId(0)), &d);
     });
     assert_eq!(
       evs,
@@ -1482,8 +1586,8 @@ mod input_tests {
         pinch_scale: 0.5,
         ..Default::default()
       };
-      EventLoop::<()>::handle_axis_event(cell, &in_);
-      EventLoop::<()>::handle_axis_event(cell, &out_);
+      EventLoop::<()>::handle_axis_event(cell, window::WindowId(WindowId(0)), &in_);
+      EventLoop::<()>::handle_axis_event(cell, window::WindowId(WindowId(0)), &out_);
     });
     assert_eq!(
       evs,
@@ -1497,7 +1601,7 @@ mod input_tests {
   #[test]
   fn axis_idle_event_emits_nothing() {
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_axis_event(cell, &AxisEventData::default());
+      EventLoop::<()>::handle_axis_event(cell, window::WindowId(WindowId(0)), &AxisEventData::default());
     });
     assert!(evs.is_empty());
   }
@@ -1509,6 +1613,7 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_input_event(
         cell,
+        0,
         &InputEvent::MouseEvent(mouse(MouseAction::Move, OhosMouseButton::NoneButton)),
       );
     });
@@ -1523,7 +1628,7 @@ mod input_tests {
         source_type: InputSourceType::Mouse,
         ..Default::default()
       };
-      EventLoop::<()>::handle_input_event(cell, &InputEvent::AxisEvent(d));
+      EventLoop::<()>::handle_input_event(cell, 0, &InputEvent::AxisEvent(d));
     });
     assert_eq!(
       evs,
@@ -1556,7 +1661,7 @@ mod input_tests {
       },
     ];
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch));
+      EventLoop::<()>::handle_input_event(cell, 0, &InputEvent::TouchEvent(touch));
     });
     assert_eq!(
       evs,
@@ -1584,7 +1689,7 @@ mod input_tests {
         ..Default::default()
       }];
       let evs = run_collected(|cell| {
-        EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch.clone()));
+        EventLoop::<()>::handle_input_event(cell, 0, &InputEvent::TouchEvent(touch.clone()));
       });
       assert_eq!(
         evs,
@@ -1606,7 +1711,7 @@ mod input_tests {
       ..Default::default()
     }];
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_input_event(cell, &InputEvent::TouchEvent(touch));
+      EventLoop::<()>::handle_input_event(cell, 0, &InputEvent::TouchEvent(touch));
     });
     assert!(evs.is_empty());
   }
@@ -1633,9 +1738,9 @@ mod input_tests {
   fn key_down_up_and_autorepeat() {
     PRESSED_KEYS.with(|k| k.borrow_mut().clear());
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Down));
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Down));
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::A, Action::Up));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::A, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::A, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::A, Action::Up));
     });
     assert_eq!(evs.len(), 3);
     assert!(
@@ -1656,9 +1761,9 @@ mod input_tests {
     // (this test leaves SHIFT held) so neither test flakes the other.
     set_modifiers(ModifiersState::empty());
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::ShiftLeft, Action::Down));
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::ShiftRight, Action::Down));
-      EventLoop::<()>::handle_input_event(cell, &key(OhosKeyCode::Numpad5, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::ShiftLeft, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::ShiftRight, Action::Down));
+      EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::Numpad5, Action::Down));
     });
     // #109 modifier tracking: the first Shift Down transitions the modifier
     // set (none → SHIFT) and dispatches ModifiersChanged BEFORE the key
@@ -1670,6 +1775,33 @@ mod input_tests {
     assert!(evs[1].contains("loc=Left"), "{}", evs[1]);
     assert!(evs[2].contains("loc=Right"), "{}", evs[2]);
     assert!(evs[3].contains("loc=Numpad"), "{}", evs[3]);
+    // Routing (review F8): a modifier transition at a non-primary window id
+    // must dispatch both the ModifiersChanged and the key event to that id.
+    // Lives here — not in input_events_dispatch_with_originating_window_id —
+    // because this test already owns the KEYBOARD_MODIFIERS write discipline
+    // (a third parallel writer would flake the process-level static).
+    set_modifiers(ModifiersState::empty());
+    let route_ids: Arc<Mutex<Vec<window::WindowId>>> = Arc::new(Mutex::new(Vec::new()));
+    let route_sink = route_ids.clone();
+    let route_cell: LoopCell<()> = Arc::new(RefCell::new(Some(Box::new(
+      move |e: event::Event<()>| {
+        if let event::Event::WindowEvent { window_id, .. } = e {
+          route_sink.lock().unwrap().push(window_id);
+        }
+      },
+    ))));
+    EventLoop::<()>::handle_input_event(
+      &route_cell,
+      5,
+      &key(OhosKeyCode::ShiftLeft, Action::Down),
+    );
+    assert_eq!(
+      route_ids.lock().unwrap().clone(),
+      vec![
+        window::WindowId(WindowId(5)),
+        window::WindowId(WindowId(5)),
+      ]
+    );
     PRESSED_KEYS.with(|k| k.borrow_mut().clear());
     set_modifiers(ModifiersState::empty());
   }
@@ -1687,7 +1819,7 @@ mod input_tests {
     // with an observable ModifiersChanged dispatched BEFORE Focused(true)
     // (Review R21 / issue Eulogizethesun/tauri#137).
     set_modifiers(ModifiersState::CONTROL);
-    let evs = run_collected(|cell| EventLoop::<()>::handle_gained_focus(cell));
+    let evs = run_collected(|cell| EventLoop::<()>::handle_gained_focus(cell, 0));
     assert_eq!(
       evs,
       vec![
@@ -1697,7 +1829,7 @@ mod input_tests {
     );
     // An already-empty set (first ACTIVE at startup) dispatches no redundant
     // ModifiersChanged — only Focused(true).
-    let evs = run_collected(|cell| EventLoop::<()>::handle_gained_focus(cell));
+    let evs = run_collected(|cell| EventLoop::<()>::handle_gained_focus(cell, 0));
     assert_eq!(evs, vec!["Focused(true)".to_string()]);
     set_modifiers(ModifiersState::empty());
   }
@@ -1709,6 +1841,7 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_input_event(
         cell,
+        0,
         &InputEvent::ImeEvent(ImeEvent::TextInputEvent(TextInputEventData {
           text: "hello".to_string(),
         })),
@@ -1720,8 +1853,16 @@ mod input_tests {
   #[test]
   fn ime_backspace_and_enter_mock_press_release_pairs() {
     let evs = run_collected(|cell| {
-      EventLoop::<()>::handle_input_event(cell, &InputEvent::ImeEvent(ImeEvent::BackspaceEvent(1)));
-      EventLoop::<()>::handle_input_event(cell, &InputEvent::ImeEvent(ImeEvent::EnterEvent(1)));
+      EventLoop::<()>::handle_input_event(
+        cell,
+        0,
+        &InputEvent::ImeEvent(ImeEvent::BackspaceEvent(1)),
+      );
+      EventLoop::<()>::handle_input_event(
+        cell,
+        0,
+        &InputEvent::ImeEvent(ImeEvent::EnterEvent(1)),
+      );
     });
     assert_eq!(evs.len(), 4);
     assert!(evs[0].starts_with("Key(Pressed,Backspace"), "{}", evs[0]);
@@ -1735,10 +1876,12 @@ mod input_tests {
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_input_event(
         cell,
+        0,
         &InputEvent::ImeEvent(ImeEvent::ImeStatusEvent(KeyboardStatus::Hide)),
       );
       EventLoop::<()>::handle_input_event(
         cell,
+        0,
         &InputEvent::ImeEvent(ImeEvent::ImeStatusEvent(KeyboardStatus::Show)),
       );
     });
@@ -1749,5 +1892,122 @@ mod input_tests {
         .all(|e| e.starts_with("Key(") && e.contains("Enter")),
       "{evs:?}"
     );
+  }
+
+  // ─── window_id routing (Phase 4, design.md D5) ─────────────────────
+
+  #[test]
+  fn input_events_dispatch_with_originating_window_id() {
+    // Input dispatch must key the emitted WindowEvent by the window id the
+    // input event carries (0 = primary, >0 = another render surface), not
+    // the historical hardcoded primary.
+    let ids: Arc<Mutex<Vec<window::WindowId>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = ids.clone();
+    let cell: LoopCell<()> = Arc::new(RefCell::new(Some(Box::new(
+      move |e: event::Event<()>| {
+        if let event::Event::WindowEvent { window_id, .. } = e {
+          sink.lock().unwrap().push(window_id);
+        }
+      },
+    ))));
+    EventLoop::<()>::handle_input_event(
+      &cell,
+      7,
+      &InputEvent::MouseEvent(mouse(MouseAction::Move, OhosMouseButton::NoneButton)),
+    );
+    EventLoop::<()>::handle_input_event(
+      &cell,
+      7,
+      &InputEvent::ImeEvent(ImeEvent::TextInputEvent(TextInputEventData {
+        text: "x".to_string(),
+      })),
+    );
+    EventLoop::<()>::handle_input_event(
+      &cell,
+      3,
+      &InputEvent::AxisEvent(AxisEventData {
+        delta_y: 1.0,
+        source_type: InputSourceType::Mouse,
+        ..Default::default()
+      }),
+    );
+    // Review F8: cover the touch and key paths too (pointer id 2 ≠ window id
+    // 5, proving routing keys on the window id the event carries). Modifier
+    // keys route in key_location_for_modifier_pairs (serialized there for the
+    // KEYBOARD_MODIFIERS static); focus/close/destroy need a running loop and
+    // stay with the device suite.
+    let mut touch = TouchEventData {
+      event_type: TouchEvent::Down,
+      ..Default::default()
+    };
+    touch.touch_points = vec![TouchPointData {
+      id: 2,
+      x: 10.0,
+      y: 20.0,
+      force: 0.5,
+      event_type: TouchEvent::Down,
+      ..Default::default()
+    }];
+    EventLoop::<()>::handle_input_event(&cell, 5, &InputEvent::TouchEvent(touch));
+    EventLoop::<()>::handle_input_event(&cell, 5, &key(OhosKeyCode::A, Action::Down));
+    assert_eq!(
+      ids.lock().unwrap().clone(),
+      vec![
+        window::WindowId(WindowId(7)),
+        window::WindowId(WindowId(7)),
+        window::WindowId(WindowId(3)),
+        window::WindowId(WindowId(5)),
+        window::WindowId(WindowId(5)),
+      ]
+    );
+  }
+}
+
+/// T26-N4 companion coverage for `live_window_ids`, the mirror filter
+/// shared by the app-level broadcast arms (ScaleFactorChanged /
+/// ThemeChanged): dead mirrors are skipped and an all-dead/empty registry
+/// falls back to the main window (id 0). One test function covers all
+/// scenarios because they share the process-global WINDOW_MIRRORS registry
+/// and #[test]s run in parallel; the sentinel ids sit far above any real
+/// OHOS window id / NEXT_WINDOW_ID value (same discipline as the
+/// pending_window_ops tests in window.rs).
+#[cfg(test)]
+mod live_window_ids_tests {
+  use super::*;
+  // The ohos directory is mounted as `platform_impl::platform`
+  // (`#[path = "ohos/mod.rs"]` in platform_impl/mod.rs), so from this
+  // module the sibling window module is two `super`s up.
+  use super::super::window::WindowStateMirror;
+
+  #[test]
+  fn live_window_ids_filters_dead_mirrors_and_falls_back_to_window_zero() {
+    const LIVE: i64 = i64::MAX - 11;
+    const DEAD: i64 = i64::MAX - 12;
+    // The strong ref keeps LIVE's mirror alive; DEAD is a Weak with no
+    // strong ref anywhere (a window dropped without running `Drop`).
+    let live_state = Arc::new(WindowStateMirror {
+      visible: std::sync::atomic::AtomicBool::new(true),
+      fullscreen: std::sync::atomic::AtomicBool::new(false),
+      maximized: std::sync::atomic::AtomicBool::new(false),
+      minimized: std::sync::atomic::AtomicBool::new(false),
+    });
+    {
+      let mut mirrors = WINDOW_MIRRORS.lock().expect("WINDOW_MIRRORS poisoned");
+      mirrors.clear();
+      mirrors.insert(LIVE, Arc::downgrade(&live_state));
+      mirrors.insert(DEAD, std::sync::Weak::new());
+    }
+    // Only the live mirror's id is broadcast.
+    assert_eq!(live_window_ids(), vec![LIVE]);
+    // Drop the strong ref: LIVE's entry goes dead too, and with no live
+    // mirrors left the broadcast falls back to the main window.
+    drop(live_state);
+    assert_eq!(live_window_ids(), vec![0]);
+    // Empty registry (pre-first-window phase): same fallback.
+    WINDOW_MIRRORS
+      .lock()
+      .expect("WINDOW_MIRRORS poisoned")
+      .clear();
+    assert_eq!(live_window_ids(), vec![0]);
   }
 }
