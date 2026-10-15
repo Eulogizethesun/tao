@@ -332,6 +332,17 @@ impl WindowBuilder {
   ///
   /// See [`Window::set_inner_size`] for details.
   ///
+  /// ## Platform-specific
+  ///
+  /// - **OpenHarmony:** For windows created as additional UIAbilities the
+  ///   requested size travels through `startAbility` `StartOptions` and must
+  ///   be positive — a zero or negative value is rejected by the ArkTS
+  ///   handler. Because the spawn is asynchronous, that rejection happens
+  ///   after the creation call has already returned: it surfaces as a log
+  ///   line and a consumable record readable via
+  ///   `openharmony_ability::take_ui_ability_spawn_rejection(label)`, not as
+  ///   an `Err` from the builder.
+  ///
   /// [`Window::set_inner_size`]: crate::window::Window::set_inner_size
   #[inline]
   pub fn with_inner_size<S: Into<Size>>(mut self, size: S) -> Self {

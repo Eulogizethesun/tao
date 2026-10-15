@@ -170,6 +170,30 @@ fn current_modifiers() -> ModifiersState {
     .unwrap_or_else(|poisoned| *poisoned.into_inner())
 }
 
+/// Live window ids from the mirror registry, with a window-0 fallback for
+/// the pre-first-window phase. Dead mirrors (window dropped without
+/// running `Drop`) are skipped — their events would only be dropped by
+/// the runtime-wry id lookup anyway, and the entries themselves are
+/// reaped lazily in the pending-status drain. Shared by the app-level
+/// broadcast arms (ConfigChanged's ScaleFactorChanged / ThemeChanged).
+fn live_window_ids() -> Vec<i64> {
+  let ids: Vec<i64> = WINDOW_MIRRORS
+    .lock()
+    .map(|mirrors| {
+      mirrors
+        .iter()
+        .filter(|(_, weak)| weak.strong_count() > 0)
+        .map(|(id, _)| *id)
+        .collect()
+    })
+    .unwrap_or_default();
+  if ids.is_empty() {
+    vec![0]
+  } else {
+    ids
+  }
+}
+
 /// Map an OHOS NDK MouseButton to tao's MouseButton.
 ///
 /// Returns `None` for `NoneButton` (no meaningful button to report).
@@ -703,19 +727,29 @@ impl<T: 'static> EventLoop<T> {
     //
     // The LOST-focus edge deliberately does NOT clear/dispatch
     // (unlike Windows lose_active_focus / macOS windowDidResignKey):
-    // an INACTIVE window receives no input events, so no stale
-    // modifiers can leak while unfocused, and this regain-side
-    // notification alone restores listener/tao consistency.
+    // the reset must be observable by the regaining window to restore
+    // listener/tao consistency, and this regain-side notification
+    // alone achieves that. Note (tao#26 review, second round): this is
+    // NOT justified by "an unfocused window receives no input" —
+    // mouse/axis pointer events are routed by SOURCE window with no
+    // focus filter and read the process-global current_modifiers(),
+    // so an unfocused window can still observe the stale set through
+    // the deprecated `modifiers` field (e.g. hover-delivered
+    // CursorMoved/scroll); only key events are focus-bound.
     //
     // Cross-window sticky-modifier limitation (tao#26 review follow-up):
     // KEYBOARD_MODIFIERS is process-global, so the set tracked under the
     // previously focused window stays live after it loses focus. When a
     // (possibly different) window regains focus, that stale set is what it
     // inherits — and if non-empty, this empty ModifiersChanged is the very
-    // first event the regaining window observes, before Focused(true) and
-    // every other observable event, whether or not it ever held those
-    // modifiers. Impact is near-zero: an unfocused window receives no
-    // input events, so nothing can act on the stale set before this reset.
+    // first event on the focus path, before Focused(true), whether or not
+    // it ever held those modifiers. Residual exposure until that reset:
+    // pointer events landing on any window — focused or not — between the
+    // stale set's last update and the next GainedFocus report the stale
+    // set in their deprecated `modifiers` field. ModifiersChanged
+    // LISTENERS are unaffected (they only ever saw the events that built
+    // the set); the next GainedFocus's reset is the single correction
+    // point.
     let had_modifiers = {
       let mut prev = ModifiersState::empty();
       if let Ok(mut modifiers) = KEYBOARD_MODIFIERS.lock() {
@@ -1001,9 +1035,11 @@ impl<T: 'static> EventLoop<T> {
           // KEYBOARD_MODIFIERS keeps the losing window's set until the next
           // GainedFocus dispatches the empty ModifiersChanged reset.
           // Cross-window sticky-modifier limitation (tao#26 review
-          // follow-up): the stale set is only ever observable to — and
-          // corrected at — the next focus gainer; near-zero impact,
-          // declared for completeness.
+          // follow-up, second round): until that reset, pointer events
+          // routed by source window (hover/move/scroll, no focus filter)
+          // still report the stale set via the deprecated `modifiers`
+          // field — including on not-yet-refocused windows; the next
+          // focus gainer is the correction point.
           HAS_FOCUS.store(false, Ordering::Relaxed);
           call_event_handler!(
             event_loop_cell,
@@ -1020,32 +1056,25 @@ impl<T: 'static> EventLoop<T> {
           // spawned UIAbility + Float sub-windows, with a window-0 fallback
           // before any window exists). Each window gets its own
           // `new_inner_size` slot so one handler's adjustment cannot leak
-          // into the next window's event; the size value itself is
-          // app-level (`content_rect` is the primary's single Rect — NG7),
-          // so every window receives the primary-derived geometry.
-          let size = app.content_rect();
+          // into the next window's event. The size is the window's OWN inner
+          // rect (`inner_rect_for`, the same source as the Resized dispatch
+          // in the ContentRectChange arm above — issue Eulogizethesun/tauri#97),
+          // not the primary's geometry broadcast to everyone: a spawned or
+          // Float window must be offered its own drawable size to resize to.
+          // Degradation: `inner_rect_for` returns (0,0,0,0) before a window's
+          // first readable windowRectChange, so fall back to the app-level
+          // content rect then (the same pre-geometry degradation the Resized
+          // path tolerates).
           let scale = app.scale();
-          // Skip dead mirrors (window dropped without running Drop): their
-          // events would only be dropped by the runtime-wry id lookup anyway,
-          // and the entries themselves are reaped lazily in the pending-
-          // status drain below.
-          let window_ids: Vec<i64> = WINDOW_MIRRORS
-            .lock()
-            .map(|mirrors| {
-              mirrors
-                .iter()
-                .filter(|(_, weak)| weak.strong_count() > 0)
-                .map(|(id, _)| *id)
-                .collect()
-            })
-            .unwrap_or_default();
-          let window_ids = if window_ids.is_empty() {
-            vec![0]
-          } else {
-            window_ids
-          };
-          for wid in window_ids {
-            let mut size = PhysicalSize::new(size.width as _, size.height as _);
+          let app_rect = app.content_rect();
+          for wid in live_window_ids() {
+            let inner = app.inner_rect_for(wid);
+            let (width, height) = if inner.width > 0 && inner.height > 0 {
+              (inner.width, inner.height)
+            } else {
+              (app_rect.width, app_rect.height)
+            };
+            let mut size = PhysicalSize::new(width as _, height as _);
             call_event_handler!(
               event_loop_cell,
               event::Event::WindowEvent {
@@ -1074,24 +1103,9 @@ impl<T: 'static> EventLoop<T> {
           };
           let prev_bits = LAST_EFFECTIVE_THEME.swap(theme_bits, Ordering::Relaxed);
           if prev_bits != theme_bits {
-            // Dead mirrors skipped — same filter as the ScaleFactorChanged
-            // broadcast above.
-            let window_ids: Vec<i64> = WINDOW_MIRRORS
-              .lock()
-              .map(|mirrors| {
-                mirrors
-                  .iter()
-                  .filter(|(_, weak)| weak.strong_count() > 0)
-                  .map(|(id, _)| *id)
-                  .collect()
-              })
-              .unwrap_or_default();
-            let window_ids = if window_ids.is_empty() {
-              vec![0]
-            } else {
-              window_ids
-            };
-            for wid in window_ids {
+            // Live mirrors only — same filter as the ScaleFactorChanged
+            // broadcast above (`live_window_ids`).
+            for wid in live_window_ids() {
               call_event_handler!(
                 event_loop_cell,
                 event::Event::WindowEvent {
@@ -1946,5 +1960,54 @@ mod input_tests {
         window::WindowId(WindowId(5)),
       ]
     );
+  }
+}
+
+/// T26-N4 companion coverage for `live_window_ids`, the mirror filter
+/// shared by the app-level broadcast arms (ScaleFactorChanged /
+/// ThemeChanged): dead mirrors are skipped and an all-dead/empty registry
+/// falls back to the main window (id 0). One test function covers all
+/// scenarios because they share the process-global WINDOW_MIRRORS registry
+/// and #[test]s run in parallel; the sentinel ids sit far above any real
+/// OHOS window id / NEXT_WINDOW_ID value (same discipline as the
+/// pending_window_ops tests in window.rs).
+#[cfg(test)]
+mod live_window_ids_tests {
+  use super::*;
+  // The ohos directory is mounted as `platform_impl::platform`
+  // (`#[path = "ohos/mod.rs"]` in platform_impl/mod.rs), so from this
+  // module the sibling window module is two `super`s up.
+  use super::super::window::WindowStateMirror;
+
+  #[test]
+  fn live_window_ids_filters_dead_mirrors_and_falls_back_to_window_zero() {
+    const LIVE: i64 = i64::MAX - 11;
+    const DEAD: i64 = i64::MAX - 12;
+    // The strong ref keeps LIVE's mirror alive; DEAD is a Weak with no
+    // strong ref anywhere (a window dropped without running `Drop`).
+    let live_state = Arc::new(WindowStateMirror {
+      visible: std::sync::atomic::AtomicBool::new(true),
+      fullscreen: std::sync::atomic::AtomicBool::new(false),
+      maximized: std::sync::atomic::AtomicBool::new(false),
+      minimized: std::sync::atomic::AtomicBool::new(false),
+    });
+    {
+      let mut mirrors = WINDOW_MIRRORS.lock().expect("WINDOW_MIRRORS poisoned");
+      mirrors.clear();
+      mirrors.insert(LIVE, Arc::downgrade(&live_state));
+      mirrors.insert(DEAD, std::sync::Weak::new());
+    }
+    // Only the live mirror's id is broadcast.
+    assert_eq!(live_window_ids(), vec![LIVE]);
+    // Drop the strong ref: LIVE's entry goes dead too, and with no live
+    // mirrors left the broadcast falls back to the main window.
+    drop(live_state);
+    assert_eq!(live_window_ids(), vec![0]);
+    // Empty registry (pre-first-window phase): same fallback.
+    WINDOW_MIRRORS
+      .lock()
+      .expect("WINDOW_MIRRORS poisoned")
+      .clear();
+    assert_eq!(live_window_ids(), vec![0]);
   }
 }

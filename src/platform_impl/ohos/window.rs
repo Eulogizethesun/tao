@@ -402,6 +402,28 @@ fn ohos_pointer_style(icon: window::CursorIcon) -> i32 {
   }
 }
 
+/// Builder-requested logical geometry → the startAbility `StartOptions`
+/// tuples (`windowWidth`/`windowHeight`, `windowLeft`/`windowTop`, physical
+/// px) used by the UIAbility spawn path. An axis the builder left
+/// unspecified stays `None` so the OS default sizing/positioning applies;
+/// zero/negative values pass through unchanged — the ArkTS
+/// start-ui-ability handler rejects them asynchronously (surfaced via
+/// `note_ui_ability_spawn_rejection`, see the spawn closure in
+/// `Window::new`), which is why the builder cannot report them as an `Err`.
+fn start_options_geometry(
+  inner_size: Option<Size>,
+  position: Option<Position>,
+  scale: f64,
+) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
+  let inner_size = inner_size
+    .map(|s| s.to_physical::<i32>(scale))
+    .map(|p| (p.width, p.height));
+  let position = position
+    .map(|p| p.to_physical::<i32>(scale))
+    .map(|p| (p.x, p.y));
+  (inner_size, position)
+}
+
 /// Converts tao's RGBA tuple to OHOS `0xAARRGGBB` u32 format.
 ///
 /// When `transparent` is true, returns `Some(0x00000000)` regardless of `bg`
@@ -559,15 +581,21 @@ impl Window {
         // eats into the content. Unspecified axes stay unset (OS default).
         // The bootstrap main window (id 0) remains OS/ArkTS sized — apply
         // `set_size` after ready there.
+        //
+        // StartOptions' official constraints (tao#26 review follow-up
+        // T26-N3) — the geometry can silently NOT apply as requested:
+        // - free windows only: a window the AMS opens in a non-free mode
+        //   (e.g. split-screen) ignores StartOptions geometry entirely;
+        // - `windowLeft`/`windowTop` are relative to the TARGET display's
+        //   origin, while tao `Position` is global-screen-space and tao
+        //   never passes `displayId` — on multi-display desktops a global
+        //   coordinate is interpreted as if display-local;
+        // - the WM clamps rects that fall outside the display bounds: a
+        //   position/size partially off-screen arrives clamped, not as
+        //   requested.
         let spawn_scale = el.app.scale() as f64;
-        let inner_size = window_attrs
-          .inner_size
-          .map(|s| s.to_physical::<i32>(spawn_scale))
-          .map(|p| (p.width, p.height));
-        let position = window_attrs
-          .position
-          .map(|p| p.to_physical::<i32>(spawn_scale))
-          .map(|p| (p.x, p.y));
+        let (inner_size, position) =
+          start_options_geometry(window_attrs.inner_size, window_attrs.position, spawn_scale);
         // The webview URL is delivered after the stage registers
         // (WebviewCreateRequest, OQ5). It is also mirrored into the want as
         // `tauri_window_url` by the ArkTS start-ui-ability handler, but no
@@ -576,6 +604,9 @@ impl Window {
         let url = String::new();
         let transparent = window_attrs.transparent;
         let app = el.app.clone();
+        // Kept for the async rejection note below: `label` is moved into
+        // the spawn closure.
+        let note_label = label.clone();
         el.bridge_executor.clone().spawn(async move {
           if let Err(e) = openharmony_ability_plugin_app_control::start_ui_ability(
             &app,
@@ -592,6 +623,21 @@ impl Window {
               "[tao-ohos] start_ui_ability failed for window {}: {:?}",
               window_id,
               e
+            );
+            // Durable, consumable record of the async rejection (tao#26
+            // review follow-up T26-N2): build() has already returned a
+            // live handle by this point — the CreateWindow reply channel
+            // closed before the spawn resolved — so without this the log
+            // line above is the only surface. A zero/negative
+            // `inner_size` reaches exactly this leg (the ArkTS
+            // start-ui-ability handler rejects non-positive width/height).
+            // Embedders (and tauri) can poll
+            // `take_ui_ability_spawn_rejection` with the label; the
+            // registry is the same one the mobile fail-fast gate notes
+            // into, so the consumption path is shared.
+            openharmony_ability::note_ui_ability_spawn_rejected(
+              &note_label,
+              &format!("start_ui_ability failed: {:?}", e),
             );
             // Roll back the pending entry if one was opened (G15): the
             // ability-destroy callback never fires for a spawn that failed,
@@ -1993,6 +2039,7 @@ pub fn keycode_from_scancode(_scancode: u32) -> KeyCode {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::dpi::{LogicalPosition, LogicalSize};
 
   // Size regression coverage (set → readback exact equality, float decor=0
   // readback, save/restore zero drift — run on a DPR ≠ 1 device)
@@ -2038,6 +2085,75 @@ mod tests {
       rgba_to_ohos_color(false, Some((0, 0, 0, 0))),
       Some(0x00000000)
     );
+  }
+
+  // T26-N4: the StartOptions geometry conversion (logical px → physical px
+  // tuples for the UIAbility spawn). Unspecified axes must stay `None` (the
+  // OS default sizing applies); DPR ≠ 1 rescales via dpi's round-half-away
+  // i32 conversion; zero/negative values pass through unchanged for the
+  // ArkTS handler to reject asynchronously.
+  #[test]
+  fn start_options_geometry_unspecified_axes_stay_none() {
+    let (size, pos) = start_options_geometry(None, None, 2.0);
+    assert_eq!(size, None);
+    assert_eq!(pos, None);
+  }
+
+  #[test]
+  fn start_options_geometry_identity_at_dpr_one() {
+    let (size, pos) = start_options_geometry(
+      Some(Size::Logical(LogicalSize::new(800.0, 600.0))),
+      Some(Position::Logical(LogicalPosition::new(10.0, 20.0))),
+      1.0,
+    );
+    assert_eq!(size, Some((800, 600)));
+    assert_eq!(pos, Some((10, 20)));
+  }
+
+  #[test]
+  fn start_options_geometry_rescales_at_non_integer_dpr() {
+    // 1.5×: dpi's i32 Pixel conversion rounds half away from zero
+    // (10.5 → 11; 800/400/20 scale exactly).
+    let (size, pos) = start_options_geometry(
+      Some(Size::Logical(LogicalSize::new(800.0, 400.0))),
+      Some(Position::Logical(LogicalPosition::new(7.0, 20.0))),
+      1.5,
+    );
+    assert_eq!(size, Some((1200, 600)));
+    assert_eq!(pos, Some((11, 30)));
+    // 2.0×: plain doubling.
+    let (size, _) = start_options_geometry(
+      Some(Size::Logical(LogicalSize::new(800.0, 600.0))),
+      None,
+      2.0,
+    );
+    assert_eq!(size, Some((1600, 1200)));
+  }
+
+  #[test]
+  fn start_options_geometry_physical_values_ignore_scale() {
+    let (size, pos) = start_options_geometry(
+      Some(Size::Physical(PhysicalSize::new(1024, 768))),
+      Some(Position::Physical(PhysicalPosition::new(5, 6))),
+      2.5,
+    );
+    assert_eq!(size, Some((1024, 768)));
+    assert_eq!(pos, Some((5, 6)));
+  }
+
+  #[test]
+  fn start_options_geometry_zero_and_negative_pass_through() {
+    // Not clamped and not dropped here: the ArkTS start-ui-ability handler
+    // rejects non-positive width/height asynchronously (T26-N2's
+    // note_ui_ability_spawn_rejection surface), so the conversion itself
+    // must forward the request verbatim.
+    let (size, pos) = start_options_geometry(
+      Some(Size::Logical(LogicalSize::new(0.0, -5.0))),
+      Some(Position::Logical(LogicalPosition::new(-3.0, 0.0))),
+      2.0,
+    );
+    assert_eq!(size, Some((0, -10)));
+    assert_eq!(pos, Some((-6, 0)));
   }
 
   // O10-6: PENDING_WINDOW_OPS lifecycle — hold while the creation handshake is
