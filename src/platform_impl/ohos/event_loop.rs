@@ -906,30 +906,70 @@ impl<T: 'static> EventLoop<T> {
         MainEvent::SurfaceDestroy { .. } => {
           call_event_handler!(event_loop_cell, event::Event::Suspended);
         }
-        MainEvent::WindowResize { window_id, size } => {
-          // Phase 3 (design.md D6): route by the originating window's id instead of
-          // the ZST constant. window_id comes from the ArkTS-wrapped options
-          // (lifecycle.rs window_resize closure / xcomponent.rs on_surface_changed).
+        MainEvent::WindowResize { .. } => {
+          // Consumed without dispatch (review R19 follow-up, issue
+          // Eulogizethesun/tauri#135). This event has two sources with
+          // different metrics, and neither is a trustworthy Resized source:
           //
-          // RESIDUAL GAP (review R11): this arm has MIXED sources with
-          // different metrics and is deliberately left as-is. The XComponent
-          // on_surface_changed path already reports the drawable (inner) area,
-          // while windowSizeChange reports the outer window rect on decorated
-          // windows — routing the payload through inner_rect_for would corrupt
-          // the former (the surface rect may precede the cache update), so
-          // neither is transformed here. tauri apps are unaffected either way
-          // (tauri-runtime-wry re-reads inner_size on every Resized); raw tao
-          // consumers see an outer-sized Resized from the windowSizeChange
-          // source, corrected by the inner-sized ContentRectChange Resized
-          // that follows the same resize.
-          let size = PhysicalSize::new(size.width as _, size.height as _);
-          call_event_handler!(
-            event_loop_cell,
-            event::Event::WindowEvent {
-              window_id: window::WindowId(WindowId(window_id)),
-              event: event::WindowEvent::Resized(size),
-            }
-          );
+          // - windowSizeChange measures the OUTER rect on decorated
+          //   windows — the wrong metric for tao's client-area Resized
+          //   contract — and every physical resize pairs it with a
+          //   windowRectChange, so the inner-sized ContentRectChange
+          //   Resized (review R11) already covers it.
+          // - XComponent on_surface_changed measures the component's OWN
+          //   surface, which equals the window's drawable area only when
+          //   the component fills the page. The old code hardcoded
+          //   window_id 0 for it, so the ability demo's SubWindowPage (a
+          //   non-fullscreen second XComponent in its own window) had its
+          //   surface changes dispatched as main-window Resized — the
+          //   misroute this drop eliminates. On resizes it is redundant
+          //   with the paired ContentRectChange Resized (same drawable
+          //   metric) — dispatching it adds at best a duplicate.
+          //
+          // The main window's initial rect arrives via the ArkTS post-load
+          // seed (NativeAbility / BridgeHost both seed windowId 0), Float
+          // sub-windows' via their own post-load seed (they register no
+          // windowSizeChange at all).
+          //
+          // RESIDUAL GAP (tao#27 review; device-probed 2026-10-12 on the
+          // pre-#27 installed build — its event chain is byte-identical
+          // to this arm's parent and still dispatched Resized here
+          // unconditionally): a drawable-only change such as
+          // setDecorations(false) on the main window
+          // (setWindowDecorVisible extends the page into the title-bar
+          // area; the window rect itself is unchanged) delivers NOTHING
+          // on the webview stack — zero Resized, and the inner-rect
+          // cache (inner_rect_for; production writers are the
+          // windowRectChange closure plus the one-time post-load seed)
+          // stays stale until the next rect-changing event. Probe (2in1
+          // HAD-W32, CDP + hilog): the toggle executed (WMSDecor) and
+          // the webview area grew by exactly the decor-chrome height
+          // within ~20ms (WebviewSurface onAreaChange), while
+          // innerSize() kept the stale value and no Resized fired; the
+          // in-run setSize control fired exactly one inner-metric
+          // Resized per round, so the pipeline was live, and a post-
+          // toggle setSize healed the cache — the source of the missing
+          // signal is that the XComponent surface source produced no
+          // Event::WindowResize there (architecturally dormant in
+          // webview apps: the Web overlays the render node,
+          // MainPage.ets) and windowRectChange never fired (outer rect
+          // unchanged). So for tauri/webview apps this drop removed no
+          // decor-toggle signal; XComponent-rendering consumers (where
+          // the surface source is live — the misroute above) may lose a
+          // decor-toggle Resized there — unprobed. The stale-cache
+          // defect predates and is independent of this drop: restoring
+          // the surface-source dispatch would not heal it
+          // (tauri-runtime-wry discards the Resized payload and re-reads
+          // inner_size) and would reintroduce the misroute. Correct fix
+          // (follow-up, not blocking): push a synthetic rect change from
+          // the ArkTS side when the drawable actually changes — e.g. the
+          // setDecorations path or the WebviewSurface onAreaChange hook
+          // — carrying a fresh getWindowProperties().drawableRect
+          // through the existing windowRectChange channel, which feeds
+          // both the cache and this loop's ContentRectChange dedup (the
+          // resize-inner bridge already reads live decor state: its
+          // chrome arithmetic was 0 while decor was hidden, probe
+          // round 4).
         }
         MainEvent::WindowRedraw { window_id, .. } => {
           // RedrawRequested is driven by the XComponent frame callback, keyed
@@ -977,10 +1017,16 @@ impl<T: 'static> EventLoop<T> {
           let inner = app.inner_rect_for(window_id);
           let (width, height) = (inner.width, inner.height);
           let degenerate = outer_degenerate || width <= 0 || height <= 0;
+          // Review R19 follow-up (issue Eulogizethesun/tauri#135): recover
+          // from a poisoned lock instead of skipping the insert — skipping
+          // made prev=None read as "first event" and re-dispatched a
+          // duplicate Resized, the exact bug this dedup cache exists to
+          // prevent. into_inner is sound: the map itself is still valid
+          // memory; the poisoning panic (if any) happened elsewhere.
           let prev = LAST_DISPATCHED_RECTS
             .lock()
-            .ok()
-            .and_then(|mut rects| rects.insert(window_id, (left, top, width, height)));
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(window_id, (left, top, width, height));
           match prev {
             None => {
               if !degenerate {
