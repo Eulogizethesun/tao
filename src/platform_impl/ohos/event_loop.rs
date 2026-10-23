@@ -46,7 +46,7 @@ const EFFECTIVE_THEME_DARK: u8 = 1;
 const EFFECTIVE_THEME_UNSEEDED: u8 = 2;
 static LAST_EFFECTIVE_THEME: AtomicU8 = AtomicU8::new(EFFECTIVE_THEME_UNSEEDED);
 
-/// #180① (design D7): the window id currently recorded as focused — the
+/// #180(a) (design D7): the window id currently recorded as focused — the
 /// shared change-edge snapshot for BOTH focus sources (FloatPage
 /// `windowEvent` WINDOW_ACTIVE/WINDOW_INACTIVE edges drained via
 /// `drain_pending_window_focus`, and the per-UIAbility stage
@@ -141,7 +141,10 @@ pub(crate) struct BridgeExecutor {
 }
 
 impl BridgeExecutor {
-  fn new() -> Self {
+  // pub(crate) (PR review fix T1): the deferred-seed UT in window.rs builds
+  // its own executor to drive the enqueue/replay mechanic without a bridge
+  // session.
+  pub(crate) fn new() -> Self {
     // Panics here are acceptable: this runs exactly once during EventLoop
     // construction, before the app is functional or any recovery path
     // exists. A failure to build the tokio runtime or spawn its driver
@@ -782,7 +785,7 @@ impl<T: 'static> EventLoop<T> {
     // #173: mirror the per-window focused bit through WINDOW_MIRRORS (miss
     // tolerated — the window may have dropped between event and write).
     super::window::set_mirror_focused(window_id, true);
-    // #180① (design D7): sync the shared change-edge snapshot so the Float
+    // #180(a) (design D7): sync the shared change-edge snapshot so the Float
     // drain path and this stage path dedup duplicate edges against the same
     // record (cross-path repeats are swallowed the same way).
     LAST_FOCUSED_WINDOW_ID.store(window_id, Ordering::Relaxed);
@@ -848,7 +851,7 @@ impl<T: 'static> EventLoop<T> {
     );
   }
 
-  /// #180① (design D7): the single blur write face — per-window mirror bit
+  /// #180(a) (design D7): the single blur write face — per-window mirror bit
   /// (#173 write face) + the `Focused(false)` event. Shared by the stage
   /// LostFocus arm (which additionally clears the app-level HAS_FOCUS bit)
   /// and the Float drain's paired-blur synthesis (which must NOT touch
@@ -871,7 +874,7 @@ impl<T: 'static> EventLoop<T> {
     );
   }
 
-  /// #180① (design D7): consume one drained `notify_window_focus` edge
+  /// #180(a) (design D7): consume one drained `notify_window_focus` edge
   /// (FloatPage windowEvent WINDOW_ACTIVE/WINDOW_INACTIVE) with change-edge
   /// dedup against [`LAST_FOCUSED_WINDOW_ID`] plus paired-blur synthesis:
   ///
@@ -1034,7 +1037,7 @@ impl<T: 'static> EventLoop<T> {
         }
       }
 
-      // #180① (design D7): Float sub-window focus edges (FloatPage windowEvent
+      // #180(a) (design D7): Float sub-window focus edges (FloatPage windowEvent
       // WINDOW_ACTIVE/WINDOW_INACTIVE → notifyWindowFocus) drain next to the
       // status backfill and run through the same change-edge dedup +
       // paired-blur synthesis the stage arms share.
@@ -1240,7 +1243,7 @@ impl<T: 'static> EventLoop<T> {
           // field — including on not-yet-refocused windows; the next
           // focus gainer is the correction point.
           HAS_FOCUS.store(false, Ordering::Relaxed);
-          // #180① (design D7): the blur write face is shared with the Float
+          // #180(a) (design D7): the blur write face is shared with the Float
           // drain's paired-blur synthesis (apply_blur), and the shared
           // change-edge snapshot records the holder clearing so cross-path
           // duplicate edges dedup the same way.
@@ -1746,6 +1749,14 @@ mod input_tests {
 
   #[test]
   fn axis_mouse_wheel_uses_line_delta() {
+    // The ctrl= assertion reads the process-level KEYBOARD_MODIFIERS static;
+    // hold the shared input/focus test lock so a parallel test's CONTROL
+    // write (gained_focus_clears_stale_modifiers_before_focus) cannot land
+    // between the read and the assert (PR review fix: device-UT flake).
+    let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_modifiers(ModifiersState::empty());
     let evs = run_collected(|cell| {
       let d = AxisEventData {
         delta_x: 0.0,
@@ -1760,10 +1771,16 @@ mod input_tests {
       evs,
       vec!["MouseWheel(LineDelta(0.0, 3.0),ctrl=false)".to_string()]
     );
+    set_modifiers(ModifiersState::empty());
   }
 
   #[test]
   fn axis_touchpad_uses_pixel_delta() {
+    // Same process-global discipline as axis_mouse_wheel_uses_line_delta.
+    let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_modifiers(ModifiersState::empty());
     let evs = run_collected(|cell| {
       let d = AxisEventData {
         delta_x: 10.0,
@@ -1778,6 +1795,7 @@ mod input_tests {
       evs,
       vec!["MouseWheel(PixelDelta(PhysicalPosition { x: 10.0, y: 20.0 }),ctrl=false)".to_string()]
     );
+    set_modifiers(ModifiersState::empty());
   }
 
   #[test]
@@ -1967,7 +1985,14 @@ mod input_tests {
     PRESSED_KEYS.with(|k| k.borrow_mut().clear());
     // KEYBOARD_MODIFIERS is a process-level static shared with the parallel
     // gained-focus test: reset before (no assumed initial state) and after
-    // (this test leaves SHIFT held) so neither test flakes the other.
+    // (this test leaves SHIFT held) so neither test flakes the other. The
+    // shared WINDOW_MIRRORS_TEST_LOCK serializes those resets against the
+    // other readers/writers of the static (PR review fix: device-UT flake —
+    // an unlocked empty-reset landing between the gained-focus test's
+    // CONTROL seed and its read suppressed the expected ModifiersChanged).
+    let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
     set_modifiers(ModifiersState::empty());
     let evs = run_collected(|cell| {
       EventLoop::<()>::handle_input_event(cell, 0, &key(OhosKeyCode::ShiftLeft, Action::Down));
@@ -2014,7 +2039,16 @@ mod input_tests {
     // KEYBOARD_MODIFIERS is a process-level static Mutex and #[test]s run in
     // parallel — the two cases must stay serialized inside this one fn, and
     // the static is reset at both ends so neither case observes another
-    // test's residue.
+    // test's residue. The WINDOW_MIRRORS_TEST_LOCK additionally serializes
+    // this test's GLOBAL writes (handle_gained_focus stores HAS_FOCUS /
+    // LAST_FOCUSED_WINDOW_ID / WINDOW_MIRRORS and clears
+    // KEYBOARD_MODIFIERS) against the focus_scale_tests family — which hold
+    // the same lock — and against the axis tests that assert ctrl=false off
+    // the process-level modifier static (PR review fix: device-UT flake,
+    // ~1-2 parallel runs in 10 observed a cross-test residue).
+    let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
     set_modifiers(ModifiersState::empty());
     // Stale modifiers (e.g. CONTROL held when focus was lost) are cleared
     // with an observable ModifiersChanged dispatched BEFORE Focused(true)
@@ -2217,7 +2251,7 @@ mod live_window_ids_tests {
   }
 }
 
-/// #180①/#180 coverage for the focus edge consumption (`design D7`) and the
+/// #180(a)/#180 coverage for the focus edge consumption (`design D7`) and the
 /// scale broadcast dedup (`design D8`). The sentinel ids sit far above any
 /// real OHOS window id and above the other test modules' sentinels; the
 /// WINDOW_MIRRORS_TEST_LOCK serializes with the mirror-registry tests, and
@@ -2272,7 +2306,7 @@ mod focus_scale_tests {
     LAST_FOCUSED_WINDOW_ID.load(Ordering::Relaxed)
   }
 
-  /// UT for #180① ① (design D7): a first Float gain edge forwards
+  /// UT for #180(a) step 1 (design D7): a first Float gain edge forwards
   /// Focused(true); a gain edge over a still-focused previous holder
   /// pair-clears it first (mirror bit + synthesized Focused(false)) — the
   /// paired semantics that keep ArkTS fast-switches (ACTIVE without a
@@ -2328,7 +2362,7 @@ mod focus_scale_tests {
       .remove(&NEW);
   }
 
-  /// UT for #180① ② (design D7): a same-window same-state gain edge is
+  /// UT for #180(a) step 2 (design D7): a same-window same-state gain edge is
   /// swallowed — zero WindowEvents, zero mirror writes, snapshot unchanged.
   #[test]
   fn ut_focus_drain_duplicate_gain_edge_is_swallowed() {
@@ -2365,7 +2399,7 @@ mod focus_scale_tests {
       .remove(&W);
   }
 
-  /// UT for #180① (design D7 loss edge): a loss edge applies only when the
+  /// UT for #180(a) (design D7 loss edge): a loss edge applies only when the
   /// window is the recorded holder (blur write face + snapshot → 0); a
   /// repeat loss edge for a window that is no longer the holder is
   /// swallowed. HAS_FOCUS stays untouched by the drain path (stage events
@@ -2438,7 +2472,7 @@ mod focus_scale_tests {
       .remove(&OTHER);
   }
 
-  /// UT for #180① ③ (design D7): the stage path and the Float drain share
+  /// UT for #180(a) step 3 (design D7): the stage path and the Float drain share
   /// LAST_FOCUSED_WINDOW_ID — a stage gain (handle_gained_focus) syncs the
   /// snapshot the drain dedups against, so a cross-path duplicate gain edge
   /// for the same window is swallowed, while a Float gain over the

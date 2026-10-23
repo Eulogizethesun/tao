@@ -187,6 +187,12 @@ pub(crate) static WINDOW_MIRRORS: std::sync::LazyLock<
 /// parallel in one test binary and each asserts exact registry contents.
 #[cfg(test)]
 pub(crate) static WINDOW_MIRRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// The lock serializes every test that touches the process-global input/focus
+// statics — WINDOW_MIRRORS + HAS_FOCUS/LAST_FOCUSED (focus_scale_tests,
+// live_window_ids_tests, window.rs mirror test) and KEYBOARD_MODIFIERS (the
+// axis tests' ctrl= assertions vs the gained-focus CONTROL write). One shared
+// domain, because the same handler writes several of these statics per call
+// (handle_gained_focus stores the focus trio AND clears the modifiers).
 
 /// Writes the per-window focused bit (#173) through [`WINDOW_MIRRORS`].
 /// A miss (unknown id, or the mirror already unregistered because the
@@ -196,7 +202,7 @@ pub(crate) static WINDOW_MIRRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mu
 pub(crate) fn set_mirror_focused(window_id: i64, focused: bool) {
   let mirror = WINDOW_MIRRORS
     .lock()
-    .expect("WINDOW_MIRRORS poisoned")
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
     .get(&window_id)
     .and_then(|weak| weak.upgrade());
   if let Some(mirror) = mirror {
@@ -204,7 +210,7 @@ pub(crate) fn set_mirror_focused(window_id: i64, focused: bool) {
   }
 }
 
-/// #180① (design D7): reads the per-window focused bit through
+/// #180(a) (design D7): reads the per-window focused bit through
 /// [`WINDOW_MIRRORS`] — the drain's paired-blur synthesis gates on it
 /// ("P 仍标记 focused=true" per the focus-state spec) so a holder whose bit
 /// was already cleared by a real stage blur is not double-blurred. An unknown
@@ -212,7 +218,7 @@ pub(crate) fn set_mirror_focused(window_id: i64, focused: bool) {
 pub(crate) fn mirror_focused_bit(window_id: i64) -> bool {
   WINDOW_MIRRORS
     .lock()
-    .expect("WINDOW_MIRRORS poisoned")
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
     .get(&window_id)
     .and_then(|weak| weak.upgrade())
     .is_some_and(|mirror| mirror.focused.load(Ordering::Acquire))
@@ -399,6 +405,46 @@ pub(crate) fn dispatch_or_queue_op(window_id: i64, op: PendingWindowOp) {
   for op in replay {
     op();
   }
+}
+
+/// PR review fix T1: enqueue a window op whose bridge client is resolved at
+/// EXECUTION time instead of call time. The eager `bridge_client` resolution
+/// in the setters ran BEFORE the queue check, so a seed fired while the
+/// client was not yet resolvable (the #184 early-init state) returned early
+/// and nothing ever entered [`PENDING_WINDOW_OPS`] — the build()-tail
+/// creation seeds (always_on_top / fullscreen / maximized / focusable /
+/// decoration flags / size limits) were permanently lost, and the handshake
+/// drain had nothing to replay. The op body re-resolves through the captured
+/// app handle at replay (a non-blocking RwLock read) and spawns the async
+/// bridge call on the executor; a still-unresolvable client degrades to a
+/// structured warn (the op dies, exactly the pre-#184 no-op semantics, but
+/// only after the queue had its chance).
+///
+/// Generic over the client type: a real `WindowClient` needs a live bridge
+/// session that a test binary does not have — the UT drives this entry point
+/// with a sentinel client (same discipline as
+/// [`bridge_client_cached_or_refetch`] / [`dispatch_or_queue_op`]).
+fn enqueue_deferred_window_op<C, F, Fut>(
+  resolve: impl Fn() -> Option<C> + Send + 'static,
+  runtime: &BridgeExecutor,
+  window_id: i64,
+  op: &str,
+  make_future: F,
+) where
+  F: FnOnce(C) -> Fut + Send + 'static,
+  Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+  let runtime = runtime.clone();
+  let op = op.to_string();
+  dispatch_or_queue_op(
+    window_id,
+    Box::new(move || match resolve() {
+      Some(client) => runtime.spawn(make_future(client)),
+      None => log::warn!(
+        "[tao-ohos] {op}: bridge client still unresolvable at replay — deferred window op dropped"
+      ),
+    }),
+  );
 }
 
 pub(crate) struct Window {
@@ -1134,6 +1180,30 @@ impl Window {
     self.dispatch_or_queue(Box::new(move || runtime.spawn(fut)));
   }
 
+  /// PR review fix T1: the client-unavailable fallback of
+  /// [`Self::spawn_or_queue`] — same queue, but the future is built at
+  /// execution time from a freshly resolved client (see
+  /// [`enqueue_deferred_window_op`]). The client-available fast path in the
+  /// setters is byte-identical to before; only the previously-dropped
+  /// `bridge_client() == None` leg now enqueues.
+  fn spawn_or_queue_deferred<F, Fut>(&self, op: &str, make_future: F)
+  where
+    F: FnOnce(openharmony_ability_plugin_window::WindowClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+  {
+    let Some(window_id) = self.window_id else {
+      return;
+    };
+    let app = self.app.clone();
+    enqueue_deferred_window_op(
+      move || app.window().ok(),
+      &self.runtime,
+      window_id,
+      op,
+      make_future,
+    );
+  }
+
   /// #168 (design D1): seed/replay the creation-time attrs at build() tail.
   ///
   /// Both halves ride the existing setter channel — every setter below funnels
@@ -1158,6 +1228,24 @@ impl Window {
             {
               log::warn!(
                 "[tao-ohos] set_window_decoration_flags (creation seed) failed for window {}: {:?}",
+                window_id,
+                e
+              );
+            }
+          });
+        } else {
+          // PR review fix T1: the eager `if let Some(client)` dropped the
+          // dispatch when the bridge client was not yet resolvable — the
+          // cache kept the flags but the ArkTS side never saw them. Defer
+          // with a replay-time resolution (consistent with the setter legs
+          // below).
+          self.spawn_or_queue_deferred("seed_creation_attrs", move |client| async move {
+            if let Err(e) = client
+              .set_window_decoration_flags(window_id, flags as i32)
+              .await
+            {
+              log::warn!(
+                "[tao-ohos] set_window_decoration_flags (creation seed, deferred) failed for window {}: {:?}",
                 window_id,
                 e
               );
@@ -1205,13 +1293,31 @@ impl Window {
   /// dispatch is the caller's business; re-dispatching on decor changes
   /// remains an open follow-up.
   fn apply_window_limits(&self, window_id: i64) {
-    let Some(client) = self.bridge_client("set_window_limits") else {
-      return;
-    };
     let min_w = self.min_inner_width.load(Ordering::Acquire) as i64;
     let min_h = self.min_inner_height.load(Ordering::Acquire) as i64;
     let max_w = self.max_inner_width.load(Ordering::Acquire) as i64;
     let max_h = self.max_inner_height.load(Ordering::Acquire) as i64;
+    let Some(client) = self.bridge_client("set_window_limits") else {
+      // PR review fix T1: the builder-time constraints dispatch (a seed leg
+      // like the ones in seed_creation_attrs) was dropped when the bridge
+      // client was not yet resolvable — the cache slots kept the values but
+      // the system limits were never pushed. Defer with a replay-time
+      // resolution (values captured as of call time, the same queue
+      // semantics as spawn_or_queue).
+      self.spawn_or_queue_deferred("set_window_limits", move |client| async move {
+        if let Err(e) = client
+          .set_window_limits(window_id, min_w, min_h, max_w, max_h)
+          .await
+        {
+          log::warn!(
+            "[tao-ohos] set_window_limits failed for window {}: {:?}",
+            window_id,
+            e
+          );
+        }
+      });
+      return;
+    };
     self.spawn_or_queue(async move {
       if let Err(e) = client
         .set_window_limits(window_id, min_w, min_h, max_w, max_h)
@@ -1522,6 +1628,19 @@ impl Window {
       // so the facade-level judging observable is the Rust-side warn, not
       // the WindowManager hilog.debug success line.
       let Some(client) = self.bridge_client("set_focusable") else {
+        // PR review fix T1: the client check ran before the queue check, so a
+        // seed (or runtime call) in the bridge-unavailable state never
+        // entered PENDING_WINDOW_OPS — the creation-time no_initial_focus
+        // seed was permanently lost. Defer with a replay-time resolution.
+        self.spawn_or_queue_deferred("set_focusable", move |client| async move {
+          if let Err(e) = client.set_window_focusable(window_id, focusable).await {
+            log::warn!(
+              "set_focusable: set_window_focusable failed for window {}: {:?}",
+              window_id,
+              e
+            );
+          }
+        });
         return;
       };
       self.spawn_or_queue(async move {
@@ -1708,6 +1827,29 @@ impl Window {
     self.mirror.maximized.store(maximized, Ordering::Release);
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_maximized") else {
+        // PR review fix T1: defer with a replay-time client resolution (the
+        // creation-time maximized seed was dropped before it could queue).
+        self.spawn_or_queue_deferred("set_maximized", move |client| async move {
+          if maximized {
+            if let Err(e) = client.maximize_window(window_id).await {
+              log::warn!(
+                "[tao-ohos] maximize_window failed for window {}: {:?}",
+                window_id,
+                e
+              );
+            }
+          } else {
+            // recover() switches MAXIMIZE/FULL_SCREEN → FLOATING (API7+,
+            // public)
+            if let Err(e) = client.recover_window(window_id).await {
+              log::warn!(
+                "[tao-ohos] recover_window failed for window {}: {:?}",
+                window_id,
+                e
+              );
+            }
+          }
+        });
         return;
       };
       if maximized {
@@ -1759,6 +1901,17 @@ impl Window {
     self.mirror.maximized.store(on, Ordering::Release);
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_fullscreen") else {
+        // PR review fix T1: defer with a replay-time client resolution (the
+        // creation-time fullscreen seed was dropped before it could queue).
+        self.spawn_or_queue_deferred("set_fullscreen", move |client| async move {
+          if let Err(e) = client.set_fullscreen(window_id, on).await {
+            log::warn!(
+              "[tao-ohos] set_fullscreen failed for window {}: {:?}",
+              window_id,
+              e
+            );
+          }
+        });
         return;
       };
       self.spawn_or_queue(async move {
@@ -1820,6 +1973,19 @@ impl Window {
     self.always_on_top.store(always_on_top, Ordering::Release);
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_always_on_top") else {
+        // PR review fix T1: the spec scenario — a window created with
+        // with_always_on_top(true) while the bridge client is not yet ready
+        // MUST queue the seed and replay it after the handshake. The eager
+        // client check dropped it before the queue check; defer instead.
+        self.spawn_or_queue_deferred("set_always_on_top", move |client| async move {
+          if let Err(e) = client.set_window_topmost(window_id, always_on_top).await {
+            log::warn!(
+              "[tao-ohos] set_window_topmost failed for window {}: {:?}",
+              window_id,
+              e
+            );
+          }
+        });
         return;
       };
       self.spawn_or_queue(async move {
@@ -2528,7 +2694,7 @@ mod tests {
   // constructed outside a bridge session — same discipline as the O10-6
   // test above).
 
-  /// UT for #168 ①: a build() carrying `always_on_top(true)` with the
+  /// UT for #168 (a): a build() carrying `always_on_top(true)` with the
   /// creation handshake pending queues exactly one seed op, which replays
   /// once the handshake completes; the default attrs of the same plan stay
   /// dispatch-free.
@@ -2591,7 +2757,7 @@ mod tests {
     drop_pending_window_ops(HELD_ID);
   }
 
-  /// UT for #168 ②: decoration-attr differences plan ONE combined
+  /// UT for #168 (b): decoration-attr differences plan ONE combined
   /// set-decoration-flags seed carrying the attr-derived bitfield — each
   /// false attr clears exactly its own bit (the maximizable clear matters
   /// downstream: set_maximized(true)'s guard reads FLAG_MAXIMIZABLE).
@@ -2626,7 +2792,7 @@ mod tests {
     );
   }
 
-  /// UT for #168 ③: default attributes plan zero dispatches — the spec's
+  /// UT for #168 (c): default attributes plan zero dispatches — the spec's
   /// "default attributes produce no extra traffic" scenario.
   #[test]
   fn ut_creation_plan_default_attrs_produce_zero_seeds() {
@@ -2645,7 +2811,7 @@ mod tests {
     );
   }
 
-  /// UT for #168 ④: a seed dispatched while the window is already ready runs
+  /// UT for #168 (d): a seed dispatched while the window is already ready runs
   /// inline — no queue entry, nothing to replay (same semantics as the
   /// runtime setters).
   #[test]
@@ -2671,6 +2837,118 @@ mod tests {
         .contains_key(&READY_ID),
       "inline dispatch must not leave a queue entry"
     );
+  }
+
+  // --- PR review fix T1: the deferred-client seed leg. The eager
+  // `bridge_client` resolution in the setters dropped a creation seed BEFORE
+  // the queue check when the client was not yet resolvable (#184 early-init
+  // state) — the build()-tail seeds never entered PENDING_WINDOW_OPS and the
+  // handshake drain had nothing to replay. `enqueue_deferred_window_op` is
+  // the replay-time-resolution fallback. Sentinel client (a real
+  // WindowClient needs a bridge session) + sentinel ids, same discipline as
+  // the #168 tests above.
+
+  #[derive(Clone, Copy)]
+  struct DeferredSeedClient;
+
+  /// UT for T1: with the bridge unresolvable at call time and the creation
+  /// handshake pending, the seed op is HELD in PENDING_WINDOW_OPS (not
+  /// dropped); once the handshake completes AND the bridge resolves, the
+  /// next drain replays it — the future is then built from the freshly
+  /// resolved client. A degraded leg keeps the bridge down at replay: the op
+  /// still runs (the queue is emptied, nothing stranded) and degrades to the
+  /// structured warn without dispatching.
+  #[test]
+  fn ut_deferred_seed_queues_while_bridge_down_and_replays_after_handshake() {
+    const HELD_ID: i64 = i64::MAX - 21;
+    const DEGRADED_ID: i64 = i64::MAX - 22;
+    let queue = || {
+      PENDING_WINDOW_OPS
+        .lock()
+        .expect("PENDING_WINDOW_OPS poisoned")
+    };
+    // Idempotent reset so a previously failed run cannot leak registry
+    // entries that would pin these ids as "not ready".
+    openharmony_ability::unregister_pending_ui_ability(HELD_ID);
+    openharmony_ability::unregister_pending_ui_ability(DEGRADED_ID);
+    drop_pending_window_ops(HELD_ID);
+    drop_pending_window_ops(DEGRADED_ID);
+
+    let bridge_up = Arc::new(AtomicBool::new(false));
+
+    // Leg 1 — hold: bridge down + handshake pending → the op must be held,
+    // exactly the spec scenario (with_always_on_top(true) while the client
+    // is not yet ready SHALL queue).
+    openharmony_ability::register_pending_ui_ability(HELD_ID);
+    assert!(!openharmony_ability::is_window_ready(HELD_ID));
+    let replayed = Arc::new(AtomicBool::new(false));
+    let flag = replayed.clone();
+    let resolve = bridge_up.clone();
+    enqueue_deferred_window_op(
+      move || {
+        if resolve.load(Ordering::Acquire) {
+          Some(DeferredSeedClient)
+        } else {
+          None
+        }
+      },
+      &BridgeExecutor::new(),
+      HELD_ID,
+      "ut_deferred_seed",
+      move |_| async move {
+        flag.store(true, Ordering::SeqCst);
+      },
+    );
+    assert!(
+      !replayed.load(Ordering::SeqCst),
+      "the deferred seed must not run while the handshake is pending"
+    );
+    assert_eq!(
+      queue().get(&HELD_ID).map(|ops| ops.len()),
+      Some(1),
+      "the deferred seed must be held while the handshake is pending"
+    );
+
+    // Leg 2 — replay: the bridge resolves + the handshake completes → the
+    // drain runs the op, which resolves the client and dispatches.
+    bridge_up.store(true, Ordering::SeqCst);
+    openharmony_ability::register_ui_ability_stage(HELD_ID);
+    assert!(openharmony_ability::is_window_ready(HELD_ID));
+    drain_ready_pending_window_ops();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !replayed.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+      std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+      replayed.load(Ordering::SeqCst),
+      "the deferred seed did not replay after the handshake drain"
+    );
+    assert!(
+      !queue().contains_key(&HELD_ID),
+      "the replayed entry must be removed"
+    );
+    openharmony_ability::unregister_pending_ui_ability(HELD_ID);
+
+    // Leg 3 — degraded: the bridge never resolves. The op still runs at
+    // replay (the queue is emptied, no stranded entry) and the client-less
+    // body degrades to the structured warn — no dispatch, no panic.
+    openharmony_ability::register_pending_ui_ability(DEGRADED_ID);
+    enqueue_deferred_window_op(
+      || None::<DeferredSeedClient>,
+      &BridgeExecutor::new(),
+      DEGRADED_ID,
+      "ut_deferred_seed_degraded",
+      |_| async move {
+        panic!("the degraded leg must never build a future");
+      },
+    );
+    openharmony_ability::register_ui_ability_stage(DEGRADED_ID);
+    drain_ready_pending_window_ops();
+    assert!(
+      !queue().contains_key(&DEGRADED_ID),
+      "the degraded leg must not strand its queue entry"
+    );
+    openharmony_ability::unregister_pending_ui_ability(DEGRADED_ID);
   }
 
   /// UT for #168 (replay half decision record): fullscreen and maximized are
