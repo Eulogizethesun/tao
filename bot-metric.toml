@@ -15,9 +15,11 @@
 # unsafe-density baseline): average-file-lines ceiling raised to 600 and the
 # unsafe-density / code-size-growth targets disabled.
 # `analysis.cfg_policy = "active"` scopes the static analysis to code that is
-# cfg-active for the analyzing host; without it the analyzer cannot map the
-# upstream raw-identifier module `mod r#async;` (platform_impl/macos) and the
-# run degrades to status=partial regardless of policy.
+# cfg-active for the analyzing host, so macOS-gated code is not analyzed as
+# if it were active on this host. Note the division of labor with the
+# in-tree fix f69ab048: the semantically-null `#[path = "async.rs"]` on
+# `mod r#async;` (platform_impl/macos) carries the analyzer's file discovery
+# (BM102), while cfg_policy carries cfg scoping.
 #
 # Restore condition: revisit once the upstream baseline debt is paid down
 # (or the fork rebases onto an upstream that clears it) — remove the
