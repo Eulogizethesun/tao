@@ -1,0 +1,22 @@
+# cargo-audit policy for the tao OHOS fork.
+#
+# The advisory database is refreshed on every `cargo audit` run; advisories
+# published after the upstream snapshot this fork tracks surface here as new
+# findings without any local code change. Entries below are documented,
+# reviewed waivers - the mirror of how upstream tauri maintains its own
+# `.cargo/audit.toml` (see tauri PR #15282). Each entry names the affected
+# dependency chain so it can be re-evaluated when upstream bumps land.
+#
+# Restore condition: drop an entry as soon as the offending version is no
+# longer in Cargo.lock (e.g. after a softbuffer/wayland-scanner update).
+[advisories]
+ignore = [
+  # quick-xml 0.39.4 quadratic runtime (RUSTSEC-2026-0194) and unbounded
+  # namespace-declaration allocation (RUSTSEC-2026-0195). Fixed in
+  # quick-xml >= 0.41, which is a breaking minor bump. The only path into
+  # this lockfile is wayland-scanner (proc-macro) <- wayland-client <-
+  # softbuffer (dev-dependency): Linux wayland stack only, unreachable from
+  # the Windows host and OHOS targets this fork ships.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
