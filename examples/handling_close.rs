@@ -56,24 +56,20 @@ fn main() {
             // WARNING: Consider using `key_without_modifers()` if available on your platform.
             // See the `key_binding` example
             match char {
-              "y" => {
-                if close_requested {
-                  // This is where you'll want to do any cleanup you need.
-                  println!("Buh-bye!");
+              "y" if close_requested => {
+                // This is where you'll want to do any cleanup you need.
+                println!("Buh-bye!");
 
-                  // For a single-window application like this, you'd normally just
-                  // break out of the event loop here. If you wanted to keep running the
-                  // event loop (i.e. if it's a multi-window application), you need to
-                  // drop the window. That closes it, and results in `Destroyed` being
-                  // sent.
-                  *control_flow = ControlFlow::Exit;
-                }
+                // For a single-window application like this, you'd normally just
+                // break out of the event loop here. If you wanted to keep running the
+                // event loop (i.e. if it's a multi-window application), you need to
+                // drop the window. That closes it, and results in `Destroyed` being
+                // sent.
+                *control_flow = ControlFlow::Exit;
               }
-              "n" => {
-                if close_requested {
-                  println!("Your window will continue to stay by your side.");
-                  close_requested = false;
-                }
+              "n" if close_requested => {
+                println!("Your window will continue to stay by your side.");
+                close_requested = false;
               }
               _ => (),
             }
