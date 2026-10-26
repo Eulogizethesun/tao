@@ -291,9 +291,7 @@ type PendingWindowOp = Box<dyn FnOnce() + Send + 'static>;
 /// the same TOCTOU discipline as wry's pending_ops).
 static PENDING_WINDOW_OPS: std::sync::LazyLock<
   std::sync::Mutex<std::collections::HashMap<i64, Vec<PendingWindowOp>>>,
-> = std::sync::LazyLock::new(|| {
-  std::sync::Mutex::new(std::collections::HashMap::new())
-});
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Event-loop drain (called on every MainEvent dispatch after a D7
 /// registration waker or Float settle waker wakes the loop): replay queued
@@ -2741,12 +2739,9 @@ mod tests {
     let order: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     for step in 1..=2u32 {
       let order = order.clone();
-      queue()
-        .entry(HELD_ID)
-        .or_default()
-        .push(Box::new(move || {
-          order.lock().expect("order log poisoned").push(step);
-        }));
+      queue().entry(HELD_ID).or_default().push(Box::new(move || {
+        order.lock().expect("order log poisoned").push(step);
+      }));
     }
     drain_ready_pending_window_ops();
     assert!(
@@ -2817,7 +2812,10 @@ mod tests {
       plan.decoration_flags, None,
       "default decoration flags must not seed"
     );
-    assert!(plan.fullscreen.is_none(), "default fullscreen must not replay");
+    assert!(
+      plan.fullscreen.is_none(),
+      "default fullscreen must not replay"
+    );
     assert!(!plan.maximized, "default maximized must not replay");
     assert!(
       !plan.no_initial_focus,
@@ -2828,7 +2826,10 @@ mod tests {
     assert!(!openharmony_ability::is_window_ready(HELD_ID));
     let ran = Arc::new(AtomicBool::new(false));
     let flag = ran.clone();
-    dispatch_or_queue_op(HELD_ID, Box::new(move || flag.store(true, Ordering::SeqCst)));
+    dispatch_or_queue_op(
+      HELD_ID,
+      Box::new(move || flag.store(true, Ordering::SeqCst)),
+    );
     let queued_len = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -2906,7 +2907,10 @@ mod tests {
       plan.decoration_flags, None,
       "default decoration flags must not seed"
     );
-    assert!(plan.fullscreen.is_none(), "default fullscreen must not replay");
+    assert!(
+      plan.fullscreen.is_none(),
+      "default fullscreen must not replay"
+    );
     assert!(!plan.maximized, "default maximized must not replay");
     assert!(
       !plan.no_initial_focus,
@@ -2974,7 +2978,10 @@ mod tests {
     );
     let ran = Arc::new(AtomicBool::new(false));
     let flag = ran.clone();
-    dispatch_or_queue_op(READY_ID, Box::new(move || flag.store(true, Ordering::SeqCst)));
+    dispatch_or_queue_op(
+      READY_ID,
+      Box::new(move || flag.store(true, Ordering::SeqCst)),
+    );
     assert!(
       ran.load(Ordering::SeqCst),
       "ready-window seed must dispatch inline"
@@ -3172,7 +3179,10 @@ mod tests {
     attrs.fullscreen = Some(Fullscreen::Borderless(None));
     attrs.maximized = true;
     let plan = creation_attr_plan(&attrs, false);
-    assert!(plan.fullscreen.is_some(), "fullscreen attr must be recorded");
+    assert!(
+      plan.fullscreen.is_some(),
+      "fullscreen attr must be recorded"
+    );
     assert!(plan.maximized, "maximized attr must be recorded");
   }
 
