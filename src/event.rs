@@ -63,14 +63,18 @@ pub enum Event<'a, T: 'static> {
   /// Emitted when the OS sends an event to a tao window.
   #[non_exhaustive]
   WindowEvent {
+    /// The id of the window that received the event.
     window_id: WindowId,
+    /// The details of the window event.
     event: WindowEvent<'a>,
   },
 
   /// Emitted when the OS sends an event to a device.
   #[non_exhaustive]
   DeviceEvent {
+    /// The id of the device that generated the event.
     device_id: DeviceId,
+    /// The details of the device event.
     event: DeviceEvent,
   },
 
@@ -146,14 +150,20 @@ pub enum Event<'a, T: 'static> {
   LoopDestroyed,
 
   /// Emitted when the app is open by external resources, like opening a file or deeplink.
-  Opened { urls: Vec<url::Url> },
+  Opened {
+    /// The URLs the app was opened with (file or deep link targets).
+    urls: Vec<url::Url>,
+  },
 
   /// ## Platform-specific
   ///
   /// - **macOS**: https://developer.apple.com/documentation/appkit/nsapplicationdelegate/1428638-applicationshouldhandlereopen with return value same as hasVisibleWindows
   /// - **Other**: Unsupported.
   #[non_exhaustive]
-  Reopen { has_visible_windows: bool },
+  Reopen {
+    /// Whether the application has any visible windows when the reopen event arrived.
+    has_visible_windows: bool,
+  },
 
   /// Emitted when the system wants to close the app but the close is still
   /// cancellable — the PC/2in1 pre-close interception point
@@ -230,6 +240,8 @@ impl<T: Clone> Clone for Event<'static, T> {
 }
 
 impl<'a, T> Event<'a, T> {
+  /// Coverts `Event<T>` to `Event<U>` if the event is not a user event,
+  /// otherwise returns the original event unchanged in `Err`.
   pub fn map_nonuser_event<U>(self) -> Result<Event<'a, U>, Event<'a, T>> {
     use self::Event::*;
     match self {
@@ -298,7 +310,9 @@ pub enum StartCause {
   /// guaranteed to be equal to or after the requested resume time.
   #[non_exhaustive]
   ResumeTimeReached {
+    /// The moment the wait that timed out was started.
     start: Instant,
+    /// The resume time that was requested via `ControlFlow::WaitUntil`.
     requested_resume: Instant,
   },
 
@@ -306,7 +320,9 @@ pub enum StartCause {
   /// the moment the wait was requested and the resume time, if requested.
   #[non_exhaustive]
   WaitCancelled {
+    /// The moment the wait that was cancelled was started.
     start: Instant,
+    /// The resume time that was requested, if any.
     requested_resume: Option<Instant>,
   },
 
@@ -377,7 +393,9 @@ pub enum WindowEvent<'a> {
   ///   events which are not marked as `is_synthetic`.
   #[non_exhaustive]
   KeyboardInput {
+    /// The id of the keyboard device that generated the event.
     device_id: DeviceId,
+    /// The keyboard event (key press or release) with its physical key and state.
     event: KeyEvent,
 
     /// If `true`, the event was generated synthetically by tao
@@ -397,36 +415,52 @@ pub enum WindowEvent<'a> {
 
   /// The cursor has moved on the window.
   CursorMoved {
+    /// The id of the pointer device that generated the event.
     device_id: DeviceId,
 
     /// (x,y) coords in pixels relative to the top-left corner of the window. Because the range of this data is
     /// limited by the display area and it may have been transformed by the OS to implement effects such as cursor
     /// acceleration, it should not be used to implement non-cursor-like interactions such as 3D camera control.
     position: PhysicalPosition<f64>,
+    /// The keyboard modifiers state at the time of the event.
     #[deprecated = "Deprecated in favor of WindowEvent::ModifiersChanged"]
     modifiers: ModifiersState,
   },
 
   /// The cursor has entered the window.
-  CursorEntered { device_id: DeviceId },
+  CursorEntered {
+    /// The id of the pointer device that generated the event.
+    device_id: DeviceId,
+  },
 
   /// The cursor has left the window.
-  CursorLeft { device_id: DeviceId },
+  CursorLeft {
+    /// The id of the pointer device that generated the event.
+    device_id: DeviceId,
+  },
 
   /// A mouse wheel movement or touchpad scroll occurred.
   MouseWheel {
+    /// The id of the input device that generated the event.
     device_id: DeviceId,
+    /// The scroll delta of the wheel or touchpad.
     delta: MouseScrollDelta,
+    /// The touch phase of the scroll gesture, where applicable.
     phase: TouchPhase,
+    /// The keyboard modifiers state at the time of the event.
     #[deprecated = "Deprecated in favor of WindowEvent::ModifiersChanged"]
     modifiers: ModifiersState,
   },
 
   /// An mouse button press has been received.
   MouseInput {
+    /// The id of the pointer device that generated the event.
     device_id: DeviceId,
+    /// Whether the button was pressed or released.
     state: ElementState,
+    /// Which mouse button the event refers to.
     button: MouseButton,
+    /// The keyboard modifiers state at the time of the event.
     #[deprecated = "Deprecated in favor of WindowEvent::ModifiersChanged"]
     modifiers: ModifiersState,
   },
@@ -437,15 +471,21 @@ pub enum WindowEvent<'a> {
   /// The parameters are: pressure level (value between 0 and 1 representing how hard the touchpad
   /// is being pressed) and stage (integer representing the click level).
   TouchpadPressure {
+    /// The id of the touchpad device that generated the event.
     device_id: DeviceId,
+    /// Pressure level between 0 and 1 representing how hard the touchpad is pressed.
     pressure: f32,
+    /// Integer representing the click level.
     stage: i64,
   },
 
   /// Motion on some analog axis. May report data redundant to other, more specific events.
   AxisMotion {
+    /// The id of the device that generated the event.
     device_id: DeviceId,
+    /// The index of the axis that moved.
     axis: AxisId,
+    /// The new value reported by the axis.
     value: f64,
   },
 
@@ -466,7 +506,10 @@ pub enum WindowEvent<'a> {
   ///
   /// For more information about DPI in general, see the [`dpi`](crate::dpi) module.
   ScaleFactorChanged {
+    /// The new scale factor of the window.
     scale_factor: f64,
+    /// A mutable reference to the inner size the window should be resized to
+    /// after the scale factor change is handled.
     new_inner_size: &'a mut PhysicalSize<u32>,
   },
 
@@ -696,7 +739,9 @@ impl DeviceId {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceEvent {
+  /// A new device was connected to the system.
   Added,
+  /// An existing device was disconnected from the system.
   Removed,
 
   /// Change in physical position of a pointing device.
@@ -713,6 +758,7 @@ pub enum DeviceEvent {
   /// Physical scroll event
   #[non_exhaustive]
   MouseWheel {
+    /// The physical scroll delta reported by the device.
     delta: MouseScrollDelta,
   },
 
@@ -721,20 +767,28 @@ pub enum DeviceEvent {
   /// device then this will be reported alongside the MouseMotion event.
   #[non_exhaustive]
   Motion {
+    /// The index of the axis that moved.
     axis: AxisId,
+    /// The new value reported by the axis.
     value: f64,
   },
 
+  /// A device button was pressed or released.
   #[non_exhaustive]
   Button {
+    /// The button that changed state.
     button: ButtonId,
+    /// Whether the button was pressed or released.
     state: ElementState,
   },
 
+  /// A raw keyboard event from the device.
   Key(RawKeyEvent),
 
+  /// A unicode codepoint was generated by the device.
   #[non_exhaustive]
   Text {
+    /// The unicode codepoint generated by the device.
     codepoint: char,
   },
 }
@@ -749,7 +803,9 @@ pub enum DeviceEvent {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RawKeyEvent {
+  /// Represents the position of the key independent of the currently active layout.
   pub physical_key: keyboard::KeyCode,
+  /// Whether the key was pressed or released.
   pub state: ElementState,
 }
 
@@ -802,7 +858,9 @@ pub struct KeyEvent {
   pub text: Option<&'static str>,
 
   pub location: keyboard::KeyLocation,
+  /// Whether the key was pressed or released.
   pub state: ElementState,
+  /// Whether this event is a repeat of an existing held-down key press.
   pub repeat: bool,
 
   pub(crate) platform_specific: platform_impl::KeyEventExtra,
@@ -850,9 +908,13 @@ impl KeyEvent {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TouchPhase {
+  /// A new touch has started with a unique finger identifier.
   Started,
+  /// The touch has moved or the pressure has changed.
   Moved,
+  /// The touch has been lifted from the screen.
   Ended,
+  /// The system has canceled tracking of this touch.
   Cancelled,
 }
 
@@ -874,8 +936,11 @@ pub enum TouchPhase {
 /// device against their face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Touch {
+  /// The id of the touch-capable device that generated the event.
   pub device_id: DeviceId,
+  /// The phase (start, move, end, cancelled) of the touch.
   pub phase: TouchPhase,
+  /// The position of the touch, in pixels relative to the top-left corner of the window.
   pub location: PhysicalPosition<f64>,
   /// Describes how hard the screen was pressed. May be `None` if the platform
   /// does not support pressure sensitivity.
@@ -957,7 +1022,9 @@ pub type ButtonId = u32;
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ElementState {
+  /// The key or button is pressed down.
   Pressed,
+  /// The key or button has been released.
   Released,
 }
 
@@ -966,9 +1033,13 @@ pub enum ElementState {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum MouseButton {
+  /// The primary (usually left) mouse button.
   Left,
+  /// The secondary (usually right) mouse button.
   Right,
+  /// The middle mouse button.
   Middle,
+  /// An unnamed mouse button with its 1-based index.
   Other(u16),
 }
 

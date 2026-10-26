@@ -18,7 +18,9 @@ pub use crate::icon::{BadIcon, Icon};
 /// Progress State
 #[derive(Debug, Clone, Copy)]
 pub enum ProgressState {
+  /// The progress bar is not shown.
   None,
+  /// Normal progress state.
   Normal,
   /// **Treated as Normal in linux and macOS**
   Indeterminate,
@@ -252,6 +254,9 @@ pub struct WindowAttributes {
   /// The default is `None`.
   pub window_icon: Option<Icon>,
 
+  /// The preferred window theme, if the platform supports theming.
+  ///
+  /// The default is `None`.
   pub preferred_theme: Option<Theme>,
 
   /// Whether the window should be initially focused or not.
@@ -1569,35 +1574,57 @@ pub enum CursorIcon {
 
   /// Cursor showing that something cannot be done.
   NotAllowed,
+  /// Cursor indicating a context menu is available.
   ContextMenu,
+  /// Cursor indicating a table cell can be selected.
   Cell,
+  /// Cursor indicating vertical text can be selected.
   VerticalText,
+  /// Cursor indicating an alias or shortcut is to be created.
   Alias,
+  /// Cursor indicating something can be copied.
   Copy,
+  /// Cursor indicating something cannot be dropped here.
   NoDrop,
   /// Indicates something can be grabbed.
   Grab,
   /// Indicates something is grabbed.
   Grabbing,
+  /// Cursor indicating scrolling in any direction is possible.
   AllScroll,
+  /// Cursor indicating the view can be zoomed in.
   ZoomIn,
+  /// Cursor indicating the view can be zoomed out.
   ZoomOut,
 
   /// Indicate that some edge is to be moved. For example, the 'SeResize' cursor
   /// is used when the movement starts from the south-east corner of the box.
   EResize,
+  /// Cursor indicating the north edge is to be moved.
   NResize,
+  /// Cursor indicating the north-east edge is to be moved.
   NeResize,
+  /// Cursor indicating the north-west edge is to be moved.
   NwResize,
+  /// Cursor indicating the south edge is to be moved.
   SResize,
+  /// Cursor indicating the south-east edge is to be moved.
   SeResize,
+  /// Cursor indicating the south-west edge is to be moved.
   SwResize,
+  /// Cursor indicating the west edge is to be moved.
   WResize,
+  /// Cursor indicating the east-west edges are to be moved.
   EwResize,
+  /// Cursor indicating the north-south edges are to be moved.
   NsResize,
+  /// Cursor indicating the north-east/south-west edges are to be moved.
   NeswResize,
+  /// Cursor indicating the north-west/south-east edges are to be moved.
   NwseResize,
+  /// Cursor indicating a table column is to be resized.
   ColResize,
+  /// Cursor indicating a table row is to be resized.
   RowResize,
 }
 
@@ -1606,17 +1633,22 @@ pub enum CursorIcon {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fullscreen {
+  /// A fullscreen mode using the exact given video mode, switching the
+  /// monitor's mode if necessary.
   Exclusive(VideoMode),
 
   /// Providing `None` to `Borderless` will fullscreen on the current monitor.
   Borderless(Option<MonitorHandle>),
 }
 
+/// The theme variant of the window.
 #[non_exhaustive]
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub enum Theme {
+  /// The light theme.
   #[default]
   Light,
+  /// The dark theme.
   Dark,
 }
 
@@ -1754,13 +1786,21 @@ impl WindowSizeConstraints {
 /// Defines the orientation that a window resize will be performed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ResizeDirection {
+  /// Resize from the east (right) edge.
   East,
+  /// Resize from the north (top) edge.
   North,
+  /// Resize from the north-east (top-right) corner.
   NorthEast,
+  /// Resize from the north-west (top-left) corner.
   NorthWest,
+  /// Resize from the south (bottom) edge.
   South,
+  /// Resize from the south-east (bottom-right) corner.
   SouthEast,
+  /// Resize from the south-west (bottom-left) corner.
   SouthWest,
+  /// Resize from the west (left) edge.
   West,
 }
 

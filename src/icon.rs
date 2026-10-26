@@ -23,22 +23,39 @@ pub enum BadIcon {
   /// Produced when the length of the `rgba` argument isn't divisible by 4, thus `rgba` can't be
   /// safely interpreted as 32bpp RGBA pixels.
   #[non_exhaustive]
-  ByteCountNotDivisibleBy4 { byte_count: usize },
+  ByteCountNotDivisibleBy4 {
+    /// The length in bytes of the `rgba` slice that was provided.
+    byte_count: usize,
+  },
   /// Produced when the number of pixels (`rgba.len() / 4`) isn't equal to `width * height`.
   /// At least one of your arguments is incorrect.
   #[non_exhaustive]
   DimensionsVsPixelCount {
+    /// The icon width that was provided.
     width: u32,
+    /// The icon height that was provided.
     height: u32,
+    /// The computed product of the provided width and height.
     width_x_height: usize,
+    /// The number of pixels derived from the `rgba` slice length.
     pixel_count: usize,
   },
   /// Produced when the provided icon width or height is equal to zero.
   #[non_exhaustive]
-  DimensionsZero { width: u32, height: u32 },
-  /// Produced when the provided icon width or height is equal to zero.
+  DimensionsZero {
+    /// The icon width that was provided.
+    width: u32,
+    /// The icon height that was provided.
+    height: u32,
+  },
+  /// Produced when multiplying the provided icon width and height overflows.
   #[non_exhaustive]
-  DimensionsMultiplyOverflow { width: u32, height: u32 },
+  DimensionsMultiplyOverflow {
+    /// The icon width that was provided.
+    width: u32,
+    /// The icon height that was provided.
+    height: u32,
+  },
   /// Produced when underlying OS functionality failed to create the icon
   OsError(io::Error),
 }
