@@ -47,6 +47,14 @@ pub trait WindowExtOpenHarmony {
   /// Returns the OS-level window ID, used to distinguish main (0) vs sub-windows.
   fn window_id(&self) -> Option<i64>;
 
+  /// Returns the resolved OHOS window kind (issue Eulogizethesun/tauri#238):
+  /// `UIAbility` for UIAbility-container windows (the bootstrap main window
+  /// and spawned UIAbility instances), `Float` for OS-level sub-windows.
+  /// Consumed by the embedding runtime (tauri-runtime-wry) to capture
+  /// `is_ui_ability_main` and gate main-window-only operations at the
+  /// dispatcher layer.
+  fn window_kind(&self) -> OHOSWindowKind;
+
   /// Returns the `BridgeRuntime` for constructing bridge-based facade clients
   /// (e.g. wry's `WebviewClient::from_bridge`).
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime;
@@ -73,6 +81,10 @@ impl WindowExtOpenHarmony for Window {
 
   fn window_id(&self) -> Option<i64> {
     self.window.window_id()
+  }
+
+  fn window_kind(&self) -> OHOSWindowKind {
+    self.window.kind()
   }
 
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime {

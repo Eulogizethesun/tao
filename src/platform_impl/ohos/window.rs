@@ -450,12 +450,21 @@ fn enqueue_deferred_window_op<C, F, Fut>(
 pub(crate) struct Window {
   app: OpenHarmonyApp,
   window_id: Option<i64>,
-  /// Window kind resolution happens at creation (local `kind` in `new()`).
-  /// Historically a field driving the set_inner_size title-bar compensation
-  /// (Float skipped it — G7); since issue Eulogizethesun/tauri#97 the
-  /// compensation is computed per-window on the ArkTS side from the window's
-  /// own `getWindowProperties()` snapshot (Float windows get chrome 0
-  /// automatically), so no per-window kind state is needed anymore.
+  /// Resolved window kind (issue Eulogizethesun/tauri#238): UIAbility vs
+  /// Float sub-window. LOCAL decision input only — consumed by the
+  /// main-window decoration gates (three button setters error out, is_*
+  /// queries report the OS-managed truth), the creation-attr seed policy
+  /// (D7) and the runtime-wry `is_ui_ability_main` capture (via
+  /// `WindowExtOpenHarmony::window_kind`).
+  ///
+  /// Distinct from what issue Eulogizethesun/tauri#97 deleted: that removed
+  /// the old kind field together with the `window_type` DOWNLINK dead chain
+  /// (whose only consumer was populating `WindowCreateParams.window_type`, a
+  /// field the create TSFN tuple never carried). #97's zero-consumers
+  /// rationale does not apply to the kind itself — it was always resolved in
+  /// `new()`, and #238 gives it real local consumers again. The
+  /// `window_type` downlink stays dead and is deleted outright in #240.
+  kind: OHOSWindowKind,
   /// Bridge facade for async window operations. Mutex'd (#184): a `None`
   /// captured at construction (bridge not yet ready during early init) is
   /// lazily re-fetched on the next `bridge_client` call and overwritten on
@@ -497,6 +506,16 @@ pub(crate) struct Window {
   always_on_top: AtomicBool,
   /// Decoration button availability bitfield. bit0 closable, bit1 maximizable,
   /// bit2 minimizable, bit3 resizable. Defaults to 0b1111=15 (all enabled).
+  ///
+  /// Sub-window contract (#238): written by the creation seed and the runtime
+  /// setters, dispatched to the ArkTS LocalStorage that drives the
+  /// SubWindowPage buttons. Main-window contract: NEVER written — the seed
+  /// ignores the three button bits and the setters error out (issue #238), so
+  /// the field stays at the all-enabled default for UIAbility windows. The
+  /// set_minimized/set_maximized guards read FLAG_MINIMIZABLE/FLAG_MAXIMIZABLE
+  /// and therefore always pass for main windows — consistent with the
+  /// OS-managed "always available" reading (disclosed, D7). The is_*
+  /// queries for main windows read `kind`, not this field.
   decoration_flags: AtomicU8,
   /// Window size constraint cache (min/max w/h, px). OHOS `setWindowLimits`
   /// writes all four values at once (0 = unlimited), non-incrementally; so
@@ -680,19 +699,30 @@ struct CreationAttrPlan {
 /// "differ from the attribute default", so a default-constructed
 /// `WindowAttributes` plans zero dispatches (spec: default attributes
 /// produce no extra traffic).
-fn creation_attr_plan(attrs: &window::WindowAttributes) -> CreationAttrPlan {
+///
+/// #238 (design D7): on a main window (`is_main`) the three decoration-button
+/// bits are NOT seeded — the buttons are OS-managed and per-button
+/// configuration does not exist on the platform. Only `resizable`
+/// participates on the main window (it has a real surface:
+/// set_resize_by_drag + the programmatic-resize gate). Runtime setters on the
+/// main window error out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
+/// always passes there — "always maximizable" is the disclosed consistent
+/// reading (D7).
+fn creation_attr_plan(attrs: &window::WindowAttributes, is_main: bool) -> CreationAttrPlan {
   let mut flags = FLAG_ALL_DECORATIONS;
   if !attrs.resizable {
     flags &= !FLAG_RESIZABLE;
   }
-  if !attrs.minimizable {
-    flags &= !FLAG_MINIMIZABLE;
-  }
-  if !attrs.maximizable {
-    flags &= !FLAG_MAXIMIZABLE;
-  }
-  if !attrs.closable {
-    flags &= !FLAG_CLOSABLE;
+  if !is_main {
+    if !attrs.minimizable {
+      flags &= !FLAG_MINIMIZABLE;
+    }
+    if !attrs.maximizable {
+      flags &= !FLAG_MAXIMIZABLE;
+    }
+    if !attrs.closable {
+      flags &= !FLAG_CLOSABLE;
+    }
   }
   CreationAttrPlan {
     always_on_top: attrs.always_on_top,
@@ -1014,6 +1044,7 @@ impl Window {
     let win = Self {
       app: el.app.clone(),
       window_id,
+      kind,
       window_client: std::sync::Mutex::new(window_client),
       bridge_refetch_warned: AtomicBool::new(false),
       runtime,
@@ -1214,7 +1245,18 @@ impl Window {
   /// is computed by [`creation_attr_plan`]: only attrs that differ from their
   /// default produce a command.
   fn seed_creation_attrs(&self, attrs: &window::WindowAttributes) {
-    let plan = creation_attr_plan(attrs);
+    // Issue Eulogizethesun/tauri#238 (design D7): a main window created with
+    // button-seed attrs (minimizable/maximizable/closable false) cannot honor
+    // them — warn + ignore (a soft preference must not fail creation), while
+    // the sub-window path keeps seeding the LocalStorage that drives the
+    // SubWindowPage buttons.
+    let is_main = self.is_ui_ability_main_window();
+    if is_main && (!attrs.minimizable || !attrs.maximizable || !attrs.closable) {
+      log::warn!(
+        "[tao-ohos] creation attrs minimizable/maximizable/closable are ignored for the OpenHarmony main window (OS-managed decoration buttons, issue #238)"
+      );
+    }
+    let plan = creation_attr_plan(attrs, is_main);
     // Decoration flags first: set_maximized's guard reads FLAG_MAXIMIZABLE
     // from this cache, so the cache must be in place before the replay half.
     if let Some(flags) = plan.decoration_flags {
@@ -1544,54 +1586,64 @@ impl Window {
   }
 
   pub fn set_visible(&self, visibility: bool) {
-    // window_id 0 (main window) is valid for minimize/restore/show/move/resize/maximize
-    // (unlike set_focus/set_focusable, where the main window is OS-managed and guarded
-    // with `window_id > 0`), so no guard here — programmatic minimize on the main window
-    // works (verified on device).
-    //
-    // OHOS has no direct window-hide API, so set_visible(false) uses minimize as a
-    // workaround. Since is_minimized() reads the local AtomicBool mirror (not
-    // getWindowStatus()), we sync the mirror here — the same pattern as
-    // set_minimized() — so is_minimized() stays consistent with the visible state.
-    // set_visible(true) uses restore (API14) + show_window; on API12 restore is
-    // unavailable → show_window best-effort (may not restore a minimized main
-    // window). The mirror is cleared regardless, matching the restore intent.
-    if let Some(window_id) = self.window_id {
-      let Some(client) = self.bridge_client("set_visible") else {
-        return;
-      };
-      if visibility {
-        self.mirror.minimized.store(false, Ordering::Release);
-        // TODO(A1): replace with AppControlExt::show_ability(env) when A1 adds the action
-        self.spawn_or_queue(async move {
-          if let Err(e) = client.restore_window(window_id).await {
-            log::warn!(
-              "[tao-ohos] restore_window failed for window {}: {:?}",
-              window_id,
-              e
-            );
-          }
-          if let Err(e) = client.show_window(window_id).await {
-            log::warn!(
-              "[tao-ohos] show_window failed for window {}: {:?}",
-              window_id,
-              e
-            );
-          }
-        });
-      } else {
-        self.mirror.minimized.store(true, Ordering::Release);
-        // TODO(A1): replace with AppControlExt::hide_ability(env) when A1 adds the action
-        self.spawn_or_queue(async move {
-          if let Err(e) = client.minimize_window(window_id).await {
-            log::warn!(
-              "[tao-ohos] minimize_window failed for window {}: {:?}",
-              window_id,
-              e
-            );
-          }
-        });
+    // window_id 0 (main window) is valid for restore/show/move/resize/maximize
+    // (unlike set_focus/set_focusable, where the main window is OS-managed and
+    // guarded with `window_id > 0`), so no guard here — programmatic
+    // show/restore on the main window works (verified on device).
+    let Some(window_id) = self.window_id else {
+      return;
+    };
+    // Issue Eulogizethesun/tauri#237: OHOS has NO window-level hide API
+    // (@ohos.window d.ts carries no hide(); `minimize()` is a task-bar
+    // minimize with different semantics, and `hideAbility()` is UIAbility-level
+    // and unavailable on PC/2in1). The former minimize downgrade lied to
+    // callers: `hide()` reported success while the window merely minimized AND
+    // poisoned the minimized mirror. The honest contract is a log + no-op here
+    // (tao stays void, upstream-aligned); the user-visible Err is surfaced one
+    // layer up at the tauri-runtime-wry dispatcher (`ohos_unsupported`), which
+    // is where tao Results reach callers. Real hide lands with A1
+    // (hide_ability action).
+    if !visibility {
+      log::error!(
+        "[tao-ohos] set_visible(false): hiding windows is not supported on OpenHarmony (no window-level hide API) — window {} left untouched",
+        window_id
+      );
+      return;
+    }
+    let Some(client) = self.bridge_client("set_visible") else {
+      return;
+    };
+    // Issue Eulogizethesun/tauri#237 (show path): restore is dispatched ONLY
+    // when the local mirror says minimized. The former unconditional
+    // restore+show double-dispatch un-maximized visible maximized windows
+    // (restore on a non-minimized window cancels maximization — the
+    // WindowManager.ets showWindowMethod guard documents the hazard). A plain
+    // visible window gets show-only (a raise), never touching its maximize
+    // state. The mirror is cleared only on the restore leg, matching the
+    // restore intent (API12: restore is unavailable -> show_window best-effort,
+    // the structured warn below still fires).
+    let minimized = self.mirror.minimized.load(Ordering::Acquire);
+    // TODO(A1): replace with AppControlExt::show_ability(env) when A1 adds the action
+    self.spawn_or_queue(async move {
+      if minimized {
+        if let Err(e) = client.restore_window(window_id).await {
+          log::warn!(
+            "[tao-ohos] restore_window failed for window {}: {:?}",
+            window_id,
+            e
+          );
+        }
       }
+      if let Err(e) = client.show_window(window_id).await {
+        log::warn!(
+          "[tao-ohos] show_window failed for window {}: {:?}",
+          window_id,
+          e
+        );
+      }
+    });
+    if minimized {
+      self.mirror.minimized.store(false, Ordering::Release);
     }
   }
 
@@ -1699,11 +1751,14 @@ impl Window {
   }
 
   // TODO(issue 4 residual, partially addressed): set_minimizable/set_maximizable/
-  // set_closable still only control decoration button visibility (Float
+  // set_closable only control decoration button visibility (Float
   // @LocalStorageProp) and do not block the programmatic APIs; the main window
-  // is a no-op for them. set_resizable is the exception since issue
-  // Eulogizethesun/tauri#104 — see below. is_resizable etc. still read from the
-  // local mirror. See doc/OHOS-window-residual-issues.md (issue 4).
+  // errors out for them (issue Eulogizethesun/tauri#238 — the buttons are
+  // OS-managed). set_resizable is the exception since issue
+  // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
+  // main-window surface in set_resize_by_drag). is_resizable etc. read from
+  // the local mirror for sub-windows; main-window button queries report the
+  // OS-managed truth (#238). See doc/OHOS-window-residual-issues.md (issue 4).
   pub fn set_resizable(&self, resizable: bool) {
     self.set_decoration_flag(FLAG_RESIZABLE, resizable);
     // Issue Eulogizethesun/tauri#104: the decoration flag only covers
@@ -1731,15 +1786,56 @@ impl Window {
     }
   }
 
+  /// Whether this window's decoration buttons are OS-managed (issue
+  /// Eulogizethesun/tauri#238): every UIAbility-container window (the
+  /// bootstrap main window AND later spawned UIAbility instances — both get
+  /// system-provided decorations with no per-button control API). Matches the
+  /// ArkTS `isUIAbilityMainWindow` gate, which throws for the same reason.
+  fn is_ui_ability_main_window(&self) -> bool {
+    matches!(self.kind, OHOSWindowKind::UIAbility)
+  }
+
   pub fn set_minimizable(&self, minimizable: bool) {
+    // Issue Eulogizethesun/tauri#238: the main window's decoration buttons are
+    // OS-managed — OpenHarmony exposes no per-button enable/disable API. The
+    // former silent bit-write + LocalStorage dispatch faked success (and the
+    // bit was never consulted for UIAbility windows anyway). Honest no-op
+    // here (tao stays void, upstream-aligned); the user-visible Err surfaces
+    // at the tauri-runtime-wry dispatcher. Sub-windows keep the real behavior.
+    if self.is_ui_ability_main_window() {
+      log::error!(
+        "[tao-ohos] set_minimizable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        minimizable,
+        self.window_id
+      );
+      return;
+    }
     self.set_decoration_flag(FLAG_MINIMIZABLE, minimizable);
   }
 
   pub fn set_maximizable(&self, maximizable: bool) {
+    // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
+    if self.is_ui_ability_main_window() {
+      log::error!(
+        "[tao-ohos] set_maximizable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        maximizable,
+        self.window_id
+      );
+      return;
+    }
     self.set_decoration_flag(FLAG_MAXIMIZABLE, maximizable);
   }
 
   pub fn set_closable(&self, closable: bool) {
+    // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
+    if self.is_ui_ability_main_window() {
+      log::error!(
+        "[tao-ohos] set_closable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        closable,
+        self.window_id
+      );
+      return;
+    }
     self.set_decoration_flag(FLAG_CLOSABLE, closable);
   }
 
@@ -2038,14 +2134,32 @@ impl Window {
   }
 
   pub fn is_minimizable(&self) -> bool {
+    // Issue Eulogizethesun/tauri#238: the main window's buttons are OS-managed
+    // and always available — report the true state instead of the local bit
+    // (which no longer tracks anything for UIAbility windows since the
+    // setters error out). Known edge (documented in the tauri rustdoc too):
+    // set_decorations(false)/setWindowDecorVisible hides the WHOLE bar; these
+    // queries still report true — same as upstream Win32, where the
+    // WS_MINIMIZEBOX-style styles stay independent of the visible chrome.
+    if self.is_ui_ability_main_window() {
+      return true;
+    }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_MINIMIZABLE != 0
   }
 
   pub fn is_maximizable(&self) -> bool {
+    // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
+    if self.is_ui_ability_main_window() {
+      return true;
+    }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_MAXIMIZABLE != 0
   }
 
   pub fn is_closable(&self) -> bool {
+    // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
+    if self.is_ui_ability_main_window() {
+      return true;
+    }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_CLOSABLE != 0
   }
 
@@ -2405,6 +2519,13 @@ impl Window {
     self.window_id
   }
 
+  /// Resolved window kind (issue Eulogizethesun/tauri#238) — surfaced through
+  /// `WindowExtOpenHarmony::window_kind` for the embedding runtime's
+  /// main-window-only dispatcher gates.
+  pub fn kind(&self) -> OHOSWindowKind {
+    self.kind
+  }
+
   /// Returns the `BridgeRuntime` for this window's `OpenHarmonyApp`.
   /// Used by wry's bridge-based webview backend to construct `WebviewClient::from_bridge`.
   pub(crate) fn bridge_runtime(
@@ -2708,7 +2829,7 @@ mod tests {
 
     let mut attrs = window::WindowAttributes::default();
     attrs.always_on_top = true;
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert!(plan.always_on_top, "always_on_top(true) must plan a seed");
     assert_eq!(
       plan.decoration_flags, None,
@@ -2765,7 +2886,7 @@ mod tests {
   fn ut_creation_plan_seeds_decoration_flags_when_attrs_differ() {
     let mut attrs = window::WindowAttributes::default();
     attrs.resizable = false;
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert_eq!(
       plan.decoration_flags,
       Some(FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE),
@@ -2775,7 +2896,7 @@ mod tests {
     let mut attrs = window::WindowAttributes::default();
     attrs.minimizable = false;
     attrs.closable = false;
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert_eq!(
       plan.decoration_flags,
       Some(FLAG_ALL_DECORATIONS & !(FLAG_MINIMIZABLE | FLAG_CLOSABLE)),
@@ -2784,7 +2905,7 @@ mod tests {
 
     let mut attrs = window::WindowAttributes::default();
     attrs.maximizable = false;
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert_eq!(
       plan.decoration_flags,
       Some(FLAG_ALL_DECORATIONS & !FLAG_MAXIMIZABLE),
@@ -2797,7 +2918,7 @@ mod tests {
   #[test]
   fn ut_creation_plan_default_attrs_produce_zero_seeds() {
     let attrs = window::WindowAttributes::default();
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert!(!plan.always_on_top, "default always_on_top must not seed");
     assert_eq!(
       plan.decoration_flags, None,
@@ -2808,6 +2929,52 @@ mod tests {
     assert!(
       !plan.no_initial_focus,
       "default focused(true) must not seed a focusable flip"
+    );
+  }
+
+  /// UT for #238 (design D7): the main window's creation-attr button seeds are
+  /// ignored — the three decoration buttons are OS-managed. The sub-window
+  /// path (`is_main = false`, exercised by the #168 tests above) keeps the
+  /// per-bit seeding.
+  #[test]
+  fn ut_creation_plan_main_window_ignores_button_seeds() {
+    // Brief:
+    // 1. Main-window attrs with all three button bits false must plan NO
+    //    decoration seed (OS-managed buttons — warn+ignore at the call site).
+    // 2. resizable(false) on the main window still plans a seed carrying ONLY
+    //    the resizable bit clear (real surface: set_resize_by_drag + the
+    //    programmatic-resize gate; D7 disclosure keeps the set_maximized
+    //    guard passing).
+    // 3. The same button attrs on a sub window (is_main = false) keep
+    //    today's per-bit seed (no behavior change there).
+    let mut attrs = window::WindowAttributes::default();
+    attrs.minimizable = false;
+    attrs.maximizable = false;
+    attrs.closable = false;
+    let plan = creation_attr_plan(&attrs, true);
+    assert_eq!(
+      plan.decoration_flags, None,
+      "main-window button seeds must be ignored (OS-managed buttons)"
+    );
+
+    let mut attrs = window::WindowAttributes::default();
+    attrs.resizable = false;
+    attrs.minimizable = false;
+    let plan = creation_attr_plan(&attrs, true);
+    assert_eq!(
+      plan.decoration_flags,
+      Some(FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE),
+      "main-window resizable(false) must seed only the resizable bit"
+    );
+
+    let mut attrs = window::WindowAttributes::default();
+    attrs.minimizable = false;
+    attrs.closable = false;
+    let plan = creation_attr_plan(&attrs, false);
+    assert_eq!(
+      plan.decoration_flags,
+      Some(FLAG_ALL_DECORATIONS & !(FLAG_MINIMIZABLE | FLAG_CLOSABLE)),
+      "sub-window button seeds keep the per-bit behavior"
     );
   }
 
@@ -2837,6 +3004,68 @@ mod tests {
         .contains_key(&READY_ID),
       "inline dispatch must not leave a queue entry"
     );
+  }
+
+  // --- Issue Eulogizethesun/tauri#237: set_visible honesty. The minimize
+  // downgrade is gone: set_visible(false) must neither dispatch a window op
+  // nor touch the minimized mirror — the user-visible Err surfaces at the
+  // tauri-runtime-wry dispatcher layer (`ohos_unsupported`), since the
+  // event-loop handler intentionally discards tao Results. A `Window` literal
+  // IS constructible inside this module (private fields); the sentinel id +
+  // pending registration make any accidental dispatch observable as a
+  // PENDING_WINDOW_OPS entry (a ready id would fire-and-forget invisibly).
+
+  /// UT for #237: set_visible(false) is an honest no-op — no minimize
+  /// dispatched, minimized mirror left untouched.
+  #[test]
+  fn ut_set_visible_false_no_dispatch_and_no_mirror_write() {
+    // Brief:
+    // 1. Build a Window literal (no bridge client) whose sentinel id is marked
+    //    pending — a dispatch leg would be HELD in PENDING_WINDOW_OPS.
+    // 2. set_visible(false).
+    // 3. Assert no pending-op entry was queued (no minimize dispatched) and
+    //    mirror.minimized stayed false (no mirror poisoning).
+    const HIDING_ID: i64 = i64::MAX - 31;
+    // Idempotent reset so a previously failed run cannot leak registry state
+    // that would pin this id as "not ready" or hold stale ops.
+    openharmony_ability::unregister_pending_ui_ability(HIDING_ID);
+    drop_pending_window_ops(HIDING_ID);
+    openharmony_ability::register_pending_ui_ability(HIDING_ID);
+    assert!(!openharmony_ability::is_window_ready(HIDING_ID));
+
+    let mirror = Arc::new(WindowStateMirror::new(true));
+    let window = Window {
+      app: OpenHarmonyApp::new(),
+      window_id: Some(HIDING_ID),
+      kind: OHOSWindowKind::Float,
+      window_client: std::sync::Mutex::new(None),
+      bridge_refetch_warned: AtomicBool::new(false),
+      runtime: BridgeExecutor::new(),
+      mirror: mirror.clone(),
+      decorations: AtomicBool::new(true),
+      transparent: false,
+      always_on_top: AtomicBool::new(false),
+      decoration_flags: AtomicU8::new(15),
+      min_inner_width: AtomicU32::new(0),
+      min_inner_height: AtomicU32::new(0),
+      max_inner_width: AtomicU32::new(0),
+      max_inner_height: AtomicU32::new(0),
+    };
+    window.set_visible(false);
+
+    assert!(
+      !mirror.minimized.load(Ordering::Acquire),
+      "set_visible(false) must not write the minimized mirror"
+    );
+    assert!(
+      !PENDING_WINDOW_OPS
+        .lock()
+        .expect("PENDING_WINDOW_OPS poisoned")
+        .contains_key(&HIDING_ID),
+      "set_visible(false) dispatched a window op (queued while pending)"
+    );
+    openharmony_ability::unregister_pending_ui_ability(HIDING_ID);
+    drop_pending_window_ops(HIDING_ID);
   }
 
   // --- PR review fix T1: the deferred-client seed leg. The eager
@@ -2960,7 +3189,7 @@ mod tests {
     let mut attrs = window::WindowAttributes::default();
     attrs.fullscreen = Some(Fullscreen::Borderless(None));
     attrs.maximized = true;
-    let plan = creation_attr_plan(&attrs);
+    let plan = creation_attr_plan(&attrs, false);
     assert!(plan.fullscreen.is_some(), "fullscreen attr must be recorded");
     assert!(plan.maximized, "maximized attr must be recorded");
   }
