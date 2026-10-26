@@ -461,7 +461,7 @@ pub enum KeyCode {
   NumpadDecimal,
   /// <kbd>/</kbd>
   NumpadDivide,
-  /// <kbd>⌅ Enter</kbd> or <kbd>↵ Return</kbd> on the numeric keypad.
+  /// The <kbd>Enter</kbd> key on the numeric keypad (distinct from Return).
   NumpadEnter,
   /// <kbd>=</kbd>
   NumpadEqual,
