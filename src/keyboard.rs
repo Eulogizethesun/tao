@@ -223,7 +223,7 @@ pub enum KeyCode {
   /// to allow the user to specify keybindings for keys which
   /// are not defined by this API.
   Unidentified(NativeKeyCode),
-  /// <kbd>`</kbd> on a US keyboard. This is also called a backtick or grave.
+  /// <kbd>\`</kbd> on a US keyboard. This is also called a backtick or grave.
   /// This is the <kbd>半角</kbd>/<kbd>全角</kbd>/<kbd>漢字</kbd>
   /// (hankaku/zenkaku/kanji) key on Japanese keyboards
   Backquote,

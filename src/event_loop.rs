@@ -5,14 +5,12 @@
 //! The `EventLoop` struct and assorted supporting types, including `ControlFlow`.
 //!
 //! If you want to send custom events to the event loop, use [`EventLoop::create_proxy()`][create_proxy]
-//! to acquire an [`EventLoopProxy`][event_loop_proxy] and call its [`send_event`][send_event] method.
+//! to acquire an [`EventLoopProxy`] and call its [`EventLoopProxy::send_event`] method.
 //!
 //! See the root-level documentation for information on how to create and use an event loop to
 //! handle events.
 //!
 //! [create_proxy]: crate::event_loop::EventLoop::create_proxy
-//! [event_loop_proxy]: crate::event_loop::EventLoopProxy
-//! [send_event]: crate::event_loop::EventLoopProxy::send_event
 use std::{error, fmt, marker::PhantomData, ops::Deref, time::Instant};
 
 use crate::{
@@ -130,7 +128,7 @@ impl<T> EventLoopBuilder<T> {
 
 /// Set by the user callback given to the `EventLoop::run` method.
 ///
-/// Indicates the desired behavior of the event loop after [`Event::RedrawEventsCleared`][events_cleared]
+/// Indicates the desired behavior of the event loop after [`Event::RedrawEventsCleared`]
 /// is emitted. Defaults to `Poll`.
 ///
 /// ## Persistency
@@ -138,8 +136,6 @@ impl<T> EventLoopBuilder<T> {
 /// given run loop. The only exception to this is `ExitWithCode` which, once set, cannot be unset.
 /// Changes are **not** persistent between multiple calls to `run_return` - issuing a new call will
 /// reset the control flow to `Poll`.
-///
-/// [events_cleared]: crate::event::Event::RedrawEventsCleared
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ControlFlow {

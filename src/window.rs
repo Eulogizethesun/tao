@@ -342,7 +342,7 @@ impl WindowBuilder {
   ///
   /// - **OpenHarmony:** For windows created as additional UIAbilities the
   ///   requested size travels through `startAbility` `StartOptions` and must
-  ///   be positive — a zero or negative value is rejected by the ArkTS
+  ///   be positive - a zero or negative value is rejected by the ArkTS
   ///   handler. Because the spawn is asynchronous, that rejection happens
   ///   after the creation call has already returned: it surfaces as a log
   ///   line and a consumable record readable via
@@ -489,7 +489,7 @@ impl WindowBuilder {
   ///
   /// ## Platform-specific
   ///
-  /// - **OpenHarmony:** Ignored at creation time — the platform backend does
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
   ///   not consume a `visible: false` attribute during window creation
   ///   (committer #168); windows are created visible. Toggle visibility with
   ///   [`Window::set_visible`] after creation instead.
@@ -549,7 +549,7 @@ impl WindowBuilder {
   ///
   /// ## Platform-specific
   ///
-  /// - **OpenHarmony:** Ignored at creation time — the platform backend does
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
   ///   not consume a window icon during window creation (committer #168);
   ///   there is no runtime `set_window_icon` on OHOS either, so the icon has
   ///   no effect for the lifetime of the window.
@@ -573,7 +573,7 @@ impl WindowBuilder {
   ///   `EventLoopBuilderExtWindows::with_theme` changes
   ///   the theme for some controls like context menus which is app-wide and can't be changed by this method.
   ///
-  /// - **OpenHarmony:** Ignored at creation time — the platform backend does
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
   ///   not consume a preferred theme during window creation (committer #168);
   ///   the window follows the system theme. `Window::set_theme` runtime
   ///   requests are unaffected.
@@ -613,7 +613,7 @@ impl WindowBuilder {
   ///   15+); the window's content is excluded from screenshots, recording, and
   ///   casting. Requires `ohos.permission.PRIVACY_WINDOW` (normal,
   ///   system_grant) declared in the app's entry module; when the permission is
-  ///   missing the call only logs a warning — the window is left unprotected
+  ///   missing the call only logs a warning - the window is left unprotected
   ///   and no error is reported (same degradation as
   ///   `Window::set_content_protection`).
   #[inline]
@@ -686,7 +686,7 @@ impl Window {
 
   /// Returns the scale factor that can be used to map logical pixels to physical pixels, and vice versa.
   ///
-  /// See the [`dpi`](crate::dpi) module for more information.
+  /// See the [`dpi`] module for more information.
   ///
   /// Note that this value can change depending on user action (for example if the window is
   /// moved to another screen); as such, tracking `WindowEvent::ScaleFactorChanged` events is
@@ -776,14 +776,14 @@ impl Window {
   /// - **iOS:** Can only be called on the main thread. Sets the top left coordinates of the
   ///   window in the screen space coordinate system.
   /// - **Android / Linux(Wayland):** Unsupported.
-  /// - **OpenHarmony:** The dispatch chain runs unconditionally — `move_window_to` forwards to
+  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `move_window_to` forwards to
   ///   `window.Window.moveWindowTo(x, y)` for both the main UIAbility window (window_id = 0)
   ///   and Float sub-windows (see `doc/ohos-window-test-mapping.md`). Two caveats: the resize
   ///   path is clamped by the system WM (freeform windows), and for the main window the move
   ///   itself is dispatched but the resulting geometry is not reliably readable back from JS
   ///   (`outer_position()` reads the `window_rect` callback, which a pure move does not
   ///   trigger). Error 1300002 ("window state is abnormal") only appears transiently when the
-  ///   window is in an abnormal state — it is not the expected outcome of a main-window call
+  ///   window is in an abnormal state - it is not the expected outcome of a main-window call
   ///   (an earlier revision of this note claimed a guaranteed 1300002 + silent no-op, which
   ///   contradicted the implementation).
   #[inline]
@@ -814,12 +814,12 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** The dispatch chain runs unconditionally — `resize_window` forwards to
+  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `resize_window` forwards to
   ///   `window.Window.resize(w, h)` with exact decor compensation, for both the main UIAbility
   ///   window (window_id = 0) and Float sub-windows (see `doc/ohos-window-test-mapping.md`).
   ///   The resize takes effect but the applied size is clamped by the system WM (freeform
   ///   windows), so the result may differ from the requested value. Error 1300002 ("window
-  ///   state is abnormal") only appears transiently when the window is in an abnormal state —
+  ///   state is abnormal") only appears transiently when the window is in an abnormal state -
   ///   it is not the expected outcome of a main-window call (an earlier revision of this note
   ///   claimed a guaranteed 1300002 + silent no-op, which contradicted the implementation).
   #[inline]
@@ -926,7 +926,7 @@ impl Window {
   /// - **OpenHarmony**: Forwarded to the window manager for the main window
   ///   and Float sub-windows alike; success or rejection is arbitrated by the
   ///   system (device arbitration 2026-10-21: the main window path is
-  ///   dispatched, not silently no-op'd — a rejection surfaces as a warning
+  ///   dispatched, not silently no-op'd - a rejection surfaces as a warning
   ///   log carrying the window id and the platform error).
   #[inline]
   pub fn set_focusable(&self, focusable: bool) {
@@ -950,7 +950,7 @@ impl Window {
   /// - **iOS / Android:** Unsupported.
   /// - **OpenHarmony:** Returns the intent bit recorded by
   ///   [`Window::set_always_on_top`](Self::set_always_on_top), not the system
-  ///   truth — the platform exposes no synchronous always-on-top query, so this
+  ///   truth - the platform exposes no synchronous always-on-top query, so this
   ///   can drift from the actual z-order.
   #[inline]
   pub fn is_always_on_top(&self) -> bool {
@@ -1137,7 +1137,7 @@ impl Window {
   /// - **OpenHarmony:** Both `Fullscreen` variants fold into the same immersive
   ///   boolean switch (no exclusive-fullscreen concept); `fullscreen()` always
   ///   reports `Fullscreen::Borderless(None)` regardless of what was set. The
-  ///   intent is not read back from the system (deliberate — reading it back
+  ///   intent is not read back from the system (deliberate - reading it back
   ///   would introduce a second, drift-prone source of truth).
   #[inline]
   pub fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) {
@@ -1174,7 +1174,7 @@ impl Window {
   /// - **Windows**: There is no guarantee that the window will be the bottom most but it will try to be.
   /// - **Linux(x11):** Result depends on the system's window manager. Consider this setting a suggestion.
   /// - **Linux(Wayland) / iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** Unsupported — the OHOS platform backend has no
+  /// - **OpenHarmony:** Unsupported - the OHOS platform backend has no
   ///   implementation, so the call is a no-op that logs one warn entry; the
   ///   signature stays `()` (it does not return `Err`).
   // TODO: Unsupported in gtk4
@@ -1191,7 +1191,7 @@ impl Window {
   /// - **Linux(Wayland) / iOS / Android:** Unsupported.
   /// - **OpenHarmony:** Records the intent bit and dispatches `setWindowTopmost`
   ///   (API 14+, requires `ohos.permission.WINDOW_TOPMOST`); only effective for
-  ///   freeform windows — the main (UIAbility) window is the supported form, and
+  ///   freeform windows - the main (UIAbility) window is the supported form, and
   ///   Float sub-windows error out (caught + warned in ArkTS, non-fatal).
   // TODO: Unsupported in gtk4
   #[inline]
@@ -1229,7 +1229,7 @@ impl Window {
   ///
   /// - **Linux / macOS**: Unlike windows, progress bar is app-wide and not specific to this window. Only supported desktop environments with `libunity` (e.g. GNOME).
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** Unsupported — silent no-op (the OHOS platform backend has
+  /// - **OpenHarmony:** Unsupported - silent no-op (the OHOS platform backend has
   ///   no implementation, so the facade body is compiled out for OHOS), same as
   ///   the upstream iOS/Android behavior; OHOS has no taskbar progress concept.
   #[inline]
@@ -1315,7 +1315,7 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android / Windows:** Unsupported.
-  /// - **OpenHarmony:** Unsupported — silent no-op (no OHOS implementation; the
+  /// - **OpenHarmony:** Unsupported - silent no-op (no OHOS implementation; the
   ///   facade body is compiled out for OHOS). OHOS has no multi-workspace concept.
   pub fn set_visible_on_all_workspaces(&self, #[allow(unused)] visible: bool) {
     #[cfg(all(
@@ -1355,7 +1355,7 @@ impl Window {
   ///
   /// - **iOS / Android:** Always returns an [`ExternalError::NotSupported`].
   /// - **OpenHarmony:** Always returns an [`ExternalError::NotSupported`] (same
-  ///   shape as iOS/Android — the platform exposes no warp-cursor API).
+  ///   shape as iOS/Android - the platform exposes no warp-cursor API).
   #[inline]
   pub fn set_cursor_position<P: Into<Position>>(&self, position: P) -> Result<(), ExternalError> {
     self.window.set_cursor_position(position.into())
@@ -1370,7 +1370,7 @@ impl Window {
   ///
   /// - **macOS:** This locks the cursor in a fixed location, which looks visually awkward.
   /// - **iOS / Android:** Always returns an [`ExternalError::NotSupported`].
-  /// - **OpenHarmony:** API 22+ only — `OH_WindowManager_LockCursor` (resolved via
+  /// - **OpenHarmony:** API 22+ only - `OH_WindowManager_LockCursor` (resolved via
   ///   dlopen in openharmony-ability); lower API versions return
   ///   [`ExternalError::NotSupported`]. The lock is confined-follow (cursor stays
   ///   within the window area, like Windows `ClipCursor`) and is only effective

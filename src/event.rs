@@ -56,7 +56,7 @@ pub enum Event<'a, T: 'static> {
   ///
   /// This event type is useful as a place to put code that should be done before you start
   /// processing events, such as updating frame timing information for benchmarking or checking
-  /// the [`StartCause`][crate::event::StartCause] to see if a timer set by
+  /// the [`StartCause`] to see if a timer set by
   /// [`ControlFlow::WaitUntil`](crate::event_loop::ControlFlow::WaitUntil) has elapsed.
   NewEvents(StartCause),
 
@@ -106,7 +106,7 @@ pub enum Event<'a, T: 'static> {
   /// state-changing events have been handled and you want to do stuff (updating state, performing
   /// calculations, etc) that happens as the "main body" of your event loop. If your program only draws
   /// graphics when something changes, it's usually better to do it in response to
-  /// [`Event::RedrawRequested`](crate::event::Event::RedrawRequested), which gets emitted
+  /// [`Event::RedrawRequested`], which gets emitted
   /// immediately after this event. Programs that draw graphics continuously, like most games,
   /// can render here unconditionally for simplicity.
   MainEventsCleared,
@@ -157,7 +157,7 @@ pub enum Event<'a, T: 'static> {
 
   /// ## Platform-specific
   ///
-  /// - **macOS**: https://developer.apple.com/documentation/appkit/nsapplicationdelegate/1428638-applicationshouldhandlereopen with return value same as hasVisibleWindows
+  /// - **macOS**: <https://developer.apple.com/documentation/appkit/nsapplicationdelegate/1428638-applicationshouldhandlereopen> with return value same as hasVisibleWindows
   /// - **Other**: Unsupported.
   #[non_exhaustive]
   Reopen {
@@ -166,14 +166,14 @@ pub enum Event<'a, T: 'static> {
   },
 
   /// Emitted when the system wants to close the app but the close is still
-  /// cancellable — the PC/2in1 pre-close interception point
+  /// cancellable - the PC/2in1 pre-close interception point
   /// (`UIAbility.onPrepareToTerminateAsync`, API 15+, requires
   /// `ohos.permission.PREPARE_APP_TERMINATE`).
   ///
   /// Fired BEFORE any teardown for window-close-button / taskbar / tray exits.
   /// Unlike [`Event::LoopDestroyed`] the handler records its answer on the
   /// shared slot: `answer.prevent()` (= tauri's `prevent_exit()`) keeps the app
-  /// running — the ArkTS caller cancels the termination — otherwise the system
+  /// running - the ArkTS caller cancels the termination - otherwise the system
   /// proceeds to the normal destroy chain. The reference is only valid for
   /// the duration of this synchronous dispatch.
   ///
@@ -291,7 +291,7 @@ impl<'a, T> Event<'a, T> {
       } => Some(Reopen {
         has_visible_windows,
       }),
-      // Contains a borrow that cannot be promoted to 'static — the probe's
+      // Contains a borrow that cannot be promoted to 'static - the probe's
       // answer slot only lives for the synchronous dispatch.
       #[cfg(target_env = "ohos")]
       PrepareToTerminate { .. } => None,
@@ -504,7 +504,7 @@ pub enum WindowEvent<'a> {
   /// is pointed to by the `new_inner_size` reference. By default, this will contain the size suggested
   /// by the OS, but it can be changed to any value.
   ///
-  /// For more information about DPI in general, see the [`dpi`](crate::dpi) module.
+  /// For more information about DPI in general, see the [`dpi`] module.
   ScaleFactorChanged {
     /// The new scale factor of the window.
     scale_factor: f64,
