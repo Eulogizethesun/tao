@@ -113,7 +113,10 @@ pub trait WindowBuilderExtOpenHarmony {
   /// Sets the OHOS window kind.
   ///
   /// - `UIAbility`: Main window that reuses the existing UIAbility container. Only one can exist (singleton).
-  /// - `Float`: Sub-window that creates a new OS-level floating window (TYPE_FLOAT).
+  /// - `SubWindow`: Sub-window created via `windowStage.createSubWindow`, living
+  ///   inside the existing UIAbility container — not the OS-wide floating window
+  ///   type (`WindowType.TYPE_FLOAT`), a conflation the former `Float` variant
+  ///   name wrongly suggested (issue Eulogizethesun/tauri#240).
   ///
   /// Default is `SubWindow` when not specified. Use `UIAbility` for the main window.
   fn with_window_kind(self, kind: OHOSWindowKind) -> Self;

@@ -535,9 +535,6 @@ pub(crate) struct Window {
   max_inner_height: AtomicU32,
 }
 
-// Upstream PR#20 window-type constants (ArkTS WindowType). UIAbility windows
-// (both the primary EntryAbility window and multi-UIAbility spawned windows —
-// that path is ported, see `Window::new`) never construct a variant of this
 /// OHOS `WindowStatusType` (API 11+) — the system's window mode, reported via
 /// `window.on('windowStatusChange')`. Values match the ArkTS enum order:
 /// 1=FULL_SCREEN, 2=MAXIMIZE, 3=MINIMIZE, 4=FLOATING, 5=SPLIT_SCREEN.
