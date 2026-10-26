@@ -23,7 +23,7 @@ use super::monitor::MonitorHandle;
 // Phase 3 (design.md D6): WindowId was a ZST — every OHOS window hashed to the
 // same key (0), so tauri-runtime-wry's window_id_map.get(&ZST) always returned the
 // last-inserted window (typically the main window). Carrying the OHOS windowId
-// (0 = main, >0 = Float sub-window) as the inner value makes per-window event
+// (0 = main, >0 = sub-window) as the inner value makes per-window event
 // routing work: distinct windows hash to distinct keys. This type lives entirely
 // inside `#[cfg(target_env = "ohos")]` (platform_impl/mod.rs:29), so other
 // platforms are unaffected (rule 2).
@@ -49,30 +49,34 @@ impl From<u64> for WindowId {
 }
 
 /// OHOS window kind: determines whether this window lives in a UIAbility
-/// container (UIAbility) or creates a new OS-level floating window (Float).
+/// container (UIAbility) or is a sub-window of an existing UIAbility
+/// container (SubWindow) — created via `windowStage.createSubWindow` and
+/// destroyed with its host UIAbility (issue Eulogizethesun/tauri#240: named
+/// for the OS concept; "Float" conflated this with the OS-wide floating
+/// window type TYPE_FLOAT, which this kind does not use).
 ///
-/// Default is UIAbility for the first window, Float for any later window.
-/// The first window must be a UIAbility (Float sub-windows attach to an
+/// Default is UIAbility for the first window, SubWindow for any later window.
+/// The first window must be a UIAbility (SubWindow sub-windows attach to an
 /// existing UIAbility container); subsequent UIAbility windows spawn a new
 /// EntryAbility instance via `start_ui_ability` with a pre-allocated window
 /// id (openspec multi-uiability-windows, design D1/D2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OHOSWindowKind {
   UIAbility,
-  Float,
+  SubWindow,
 }
 
 /// Latches once the first (UIAbility) window has been created. Only
-/// constraint it enforces: the first window must be a UIAbility — a Float
-/// window has no container to attach to. Replaces the old `UIABILITY_CREATED`
-/// singleton guard (design D2).
+/// constraint it enforces: the first window must be a UIAbility — a
+/// SubWindow window has no container to attach to. Replaces the old
+/// `UIABILITY_CREATED` singleton guard (design D2).
 ///
 /// Process-lifetime bootstrap marker (committer Eulogizethesun/tauri#169):
 /// it is deliberately NOT reset on window `Drop` — `Drop` only unregisters
 /// the per-window state mirror, so the latch keeps recording "a UIAbility
 /// container exists in this process". Later windows therefore default to
-/// `OHOSWindowKind::Float`, while an explicit UIAbility request stays legal
-/// (it spawns a fresh EntryAbility via the spawn chain).
+/// `OHOSWindowKind::SubWindow`, while an explicit UIAbility request stays
+/// legal (it spawns a fresh EntryAbility via the spawn chain).
 static FIRST_WINDOW_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// Decoration button bitfield constants (aligned with openharmony-ability ArkTS).
@@ -451,7 +455,7 @@ pub(crate) struct Window {
   app: OpenHarmonyApp,
   window_id: Option<i64>,
   /// Resolved window kind (issue Eulogizethesun/tauri#238): UIAbility vs
-  /// Float sub-window. LOCAL decision input only — consumed by the
+  /// SubWindow. LOCAL decision input only — consumed by the
   /// main-window decoration gates (three button setters error out, is_*
   /// queries report the OS-managed truth), the creation-attr seed policy
   /// (D7) and the runtime-wry `is_ui_ability_main` capture (via
@@ -463,7 +467,8 @@ pub(crate) struct Window {
   /// field the create TSFN tuple never carried). #97's zero-consumers
   /// rationale does not apply to the kind itself — it was always resolved in
   /// `new()`, and #238 gives it real local consumers again. The
-  /// `window_type` downlink stays dead and is deleted outright in #240.
+  /// `window_type` downlink (and the creation window-type enum that fed it) is
+  /// deleted outright since #240.
   kind: OHOSWindowKind,
   /// Bridge facade for async window operations. Mutex'd (#184): a `None`
   /// captured at construction (bridge not yet ready during early init) is
@@ -533,21 +538,6 @@ pub(crate) struct Window {
 // Upstream PR#20 window-type constants (ArkTS WindowType). UIAbility windows
 // (both the primary EntryAbility window and multi-UIAbility spawned windows —
 // that path is ported, see `Window::new`) never construct a variant of this
-// enum: their creation path passes the literal 0 (which coincides with
-// `TypeApp`'s value — the enum has no "none" sentinel), matching how the OS
-// creates the bootstrap window, so `TypeMain` itself stays unconstructed.
-// Float sub-windows are the only constructors of an explicit variant
-// (`TypeFloat`). The remaining variants are kept for parity with
-// upstream.
-#[allow(dead_code)]
-enum OHOSWindowType {
-  TypeApp = 0,
-  TypeSystemAlert = 1,
-  TypeFloat = 8,
-  TypeDialog = 16,
-  TypeMain = 32,
-}
-
 /// OHOS `WindowStatusType` (API 11+) — the system's window mode, reported via
 /// `window.on('windowStatusChange')`. Values match the ArkTS enum order:
 /// 1=FULL_SCREEN, 2=MAXIMIZE, 3=MINIMIZE, 4=FLOATING, 5=SPLIT_SCREEN.
@@ -744,23 +734,23 @@ impl Window {
     pl_attrs: PlatformSpecificWindowBuilderAttributes,
   ) -> Result<Self, error::OsError> {
     // Resolve the window kind: explicit builder choice, else the first window
-    // defaults to UIAbility and any later one to Float.
+    // defaults to UIAbility and any later one to SubWindow.
     let kind = match pl_attrs.window_kind {
       Some(kind) => kind,
       None if !FIRST_WINDOW_CREATED.load(Ordering::SeqCst) => OHOSWindowKind::UIAbility,
-      None => OHOSWindowKind::Float,
+      None => OHOSWindowKind::SubWindow,
     };
     let is_ui_ability_window = matches!(kind, OHOSWindowKind::UIAbility);
 
     // First-window latch (design D2): the first window must be a UIAbility —
-    // a Float sub-window attaches to an existing UIAbility container
+    // a SubWindow attaches to an existing UIAbility container
     // (WindowManager stage) and cannot bootstrap the process. Subsequent
     // UIAbility windows are legal and take the start_ui_ability branch below.
     // The bootstrap main window is created on the event-loop thread during
     // app setup, before any command can race this swap.
     let is_first_window = !FIRST_WINDOW_CREATED.swap(true, Ordering::SeqCst);
     if is_first_window && !is_ui_ability_window {
-      // Rejection semantics: an explicit Float request for the first window
+      // Rejection semantics: an explicit SubWindow request for the first window
       // fails fast with Err here (this path silently continued before the
       // D2 latch introduced the check). Roll back the latch: no window was
       // created; a retry with a UIAbility window must still be able to
@@ -777,17 +767,9 @@ impl Window {
       // note_ui_ability_spawn_rejected surface here — rejection is conveyed
       // by the create call itself.
       FIRST_WINDOW_CREATED.store(false, Ordering::SeqCst);
-      log::error!("the first OHOS window must be a UIAbility window (Float has no container to attach to)");
+      log::error!("the first OHOS window must be a UIAbility window (a SubWindow has no container to attach to)");
       return Err(os_error!(OsError));
     }
-
-    let window_type = if is_ui_ability_window {
-      // UIAbility window does not need a window_type
-      0
-    } else {
-      // Float sub-window uses TypeFloat
-      OHOSWindowType::TypeFloat as i32
-    };
 
     let window_id = if is_ui_ability_window {
       if is_first_window {
@@ -874,7 +856,7 @@ impl Window {
         // a spawned UIAbility window honors `.inner_size()/.position()`
         // instead of falling back to the OS default sizing. StartOptions
         // sizes the window rectangle (frame included) — same contract as the
-        // Float branch's WindowCreateParams below; a decorated window's frame
+        // SubWindow branch's WindowCreateParams below; a decorated window's frame
         // eats into the content. Unspecified axes stay unset (OS default).
         // The bootstrap main window (id 0) remains OS/ArkTS sized — apply
         // `set_size` after ready there.
@@ -950,14 +932,14 @@ impl Window {
         Some(window_id)
       }
     } else {
-      // Float window: create a new OS-level floating window via create_os_window.
+      // SubWindow: create a new OS-level sub-window via create_os_window.
       // window_id > 0, wry takes Path 2 (load_url).
       let label = pl_attrs
         .label
         .clone()
         .unwrap_or_else(|| window_attrs.title.clone());
       // Honor the builder's inner_size/position (logical px → physical) so a
-      // Float WebviewWindow sized via `.inner_size()/.position()` actually
+      // A SubWindow WebviewWindow sized via `.inner_size()/.position()` actually
       // applies. Without this, createOSWindow falls back to the 800×600 default
       // and ignores the requested geometry entirely.
       let scale = el.app.scale() as f64;
@@ -977,7 +959,6 @@ impl Window {
         .unwrap_or((100, 100));
       let params = WindowCreateParams {
         name: label.clone(),
-        window_type: window_type as i32,
         width,
         height,
         x,
@@ -1004,7 +985,7 @@ impl Window {
         }
         Err(e) => {
           log::error!(
-            "[tao-ohos] create_os_window failed for Float window {:?}: {:?}",
+            "[tao-ohos] create_os_window failed for SubWindow window {:?}: {:?}",
             label,
             e
           );
@@ -1839,7 +1820,7 @@ impl Window {
     self.set_decoration_flag(FLAG_CLOSABLE, closable);
   }
 
-  /// Common helper: update one decoration bit and dispatch to ArkTS (FloatPage LocalStorage).
+  /// Common helper: update one decoration bit and dispatch to ArkTS (SubWindowPage LocalStorage).
   /// Dispatched via the window bridge facade fire-and-forget (no `set-decorations`
   /// variant carrying flags exists — the ArkTS WindowManager.setDecorationFlag
   /// intercepts by reading this bitfield; here we only write the local mirror +
@@ -2384,11 +2365,11 @@ impl Window {
   pub fn drag_window(&self) -> Result<(), error::ExternalError> {
     // OHOS startMoving (API14+) must be called in onTouch(TouchType.Down) —
     // cannot be triggered programmatically from Rust. Float sub-windows drag
-    // via FloatPage title bar onTouch→startMoving; the main UIAbility window
+    // via SubWindowPage title bar onTouch→startMoving; the main UIAbility window
     // has no such path, so this is a no-op there. Returns Ok (no error) since
-    // drag is handled at the UI layer (FloatPage), not via this API.
+    // drag is handled at the UI layer (SubWindowPage), not via this API.
     log::debug!(
-      "[tao-ohos] drag_window: no-op (startMoving must be called from onTouch in FloatPage; window_id={:?})",
+      "[tao-ohos] drag_window: no-op (startMoving must be called from onTouch in SubWindowPage; window_id={:?})",
       self.window_id
     );
     Ok(())
@@ -3037,7 +3018,7 @@ mod tests {
     let window = Window {
       app: OpenHarmonyApp::new(),
       window_id: Some(HIDING_ID),
-      kind: OHOSWindowKind::Float,
+      kind: OHOSWindowKind::SubWindow,
       window_client: std::sync::Mutex::new(None),
       bridge_refetch_warned: AtomicBool::new(false),
       runtime: BridgeExecutor::new(),

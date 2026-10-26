@@ -47,7 +47,7 @@ const EFFECTIVE_THEME_UNSEEDED: u8 = 2;
 static LAST_EFFECTIVE_THEME: AtomicU8 = AtomicU8::new(EFFECTIVE_THEME_UNSEEDED);
 
 /// #180(a) (design D7): the window id currently recorded as focused — the
-/// shared change-edge snapshot for BOTH focus sources (FloatPage
+/// shared change-edge snapshot for BOTH focus sources (SubWindowPage
 /// `windowEvent` WINDOW_ACTIVE/WINDOW_INACTIVE edges drained via
 /// `drain_pending_window_focus`, and the per-UIAbility stage
 /// GainedFocus/LostFocus arms). 0 = none. The edge rules built on it:
@@ -116,7 +116,7 @@ pub(crate) fn effective_theme(app: &OpenHarmonyApp) -> Theme {
 
 /// Last known cursor position lives in the process-level cursor statics inside
 /// openharmony-ability (screen-global vp, fed by the ArkTS `onMouse` handlers
-/// of MainPage AND FloatPage via the `update_cursor_position` NAPI function —
+/// of MainPage AND SubWindowPage via the `update_cursor_position` NAPI function —
 /// ohos-cursor-passthrough D1/D2) and is read back through
 /// `OpenHarmonyApp::cursor_position()` (physical px). Never-fed reads fail
 /// with the typed untracked error → `ExternalError::NotSupported` (D3/R5);
@@ -297,7 +297,7 @@ fn emit_synthetic_key<T: 'static>(
 
 /// Shared cursor-position read (physical px), used by both
 /// `EventLoopWindowTarget::cursor_position` and `Window::cursor_position`.
-/// Fed by the ArkTS `onMouse` handlers (MainPage AND FloatPage —
+/// Fed by the ArkTS `onMouse` handlers (MainPage AND SubWindowPage —
 /// ohos-cursor-passthrough D2) via the `update_cursor_position` NAPI
 /// function; the vp→physical conversion and the bit-unpacking of the process
 /// statics live inside `OpenHarmonyApp::cursor_position` (issue #87 major-10)
@@ -875,7 +875,7 @@ impl<T: 'static> EventLoop<T> {
   }
 
   /// #180(a) (design D7): consume one drained `notify_window_focus` edge
-  /// (FloatPage windowEvent WINDOW_ACTIVE/WINDOW_INACTIVE) with change-edge
+  /// (SubWindowPage windowEvent WINDOW_ACTIVE/WINDOW_INACTIVE) with change-edge
   /// dedup against [`LAST_FOCUSED_WINDOW_ID`] plus paired-blur synthesis:
   ///
   /// - gain edge (`focused=true`, last≠W): first pair-clear the previous
@@ -1037,7 +1037,7 @@ impl<T: 'static> EventLoop<T> {
         }
       }
 
-      // #180(a) (design D7): Float sub-window focus edges (FloatPage windowEvent
+      // #180(a) (design D7): Float sub-window focus edges (SubWindowPage windowEvent
       // WINDOW_ACTIVE/WINDOW_INACTIVE → notifyWindowFocus) drain next to the
       // status backfill and run through the same change-edge dedup +
       // paired-blur synthesis the stage arms share.

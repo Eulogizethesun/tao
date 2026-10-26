@@ -49,7 +49,8 @@ pub trait WindowExtOpenHarmony {
 
   /// Returns the resolved OHOS window kind (issue Eulogizethesun/tauri#238):
   /// `UIAbility` for UIAbility-container windows (the bootstrap main window
-  /// and spawned UIAbility instances), `Float` for OS-level sub-windows.
+  /// and spawned UIAbility instances), `SubWindow` for sub-windows created
+  /// via `windowStage.createSubWindow` (issue Eulogizethesun/tauri#240).
   /// Consumed by the embedding runtime (tauri-runtime-wry) to capture
   /// `is_ui_ability_main` and gate main-window-only operations at the
   /// dispatcher layer.
@@ -59,12 +60,12 @@ pub trait WindowExtOpenHarmony {
   /// (e.g. wry's `WebviewClient::from_bridge`).
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime;
 
-  /// Destroys the OS-level window: Float sub-windows call `destroyWindow`;
+  /// Destroys the OS-level window: SubWindow sub-windows call `destroyWindow`;
   /// the main (UIAbility) window is system-managed — in-app destroys are
   /// rejected by the bridge for window id 0.
   ///
   /// Fire-and-forget — the bridge call is spawned on the window's bridge
-  /// executor. Recursion-safe against the Float close flow: the synthesized
+  /// executor. Recursion-safe against the sub-window close flow: the synthesized
   /// `CloseRequested` this eventually triggers finds the runtime-side book
   /// already cleaned up.
   fn close(&self);
@@ -114,7 +115,7 @@ pub trait WindowBuilderExtOpenHarmony {
   /// - `UIAbility`: Main window that reuses the existing UIAbility container. Only one can exist (singleton).
   /// - `Float`: Sub-window that creates a new OS-level floating window (TYPE_FLOAT).
   ///
-  /// Default is `Float` when not specified. Use `UIAbility` for the main window.
+  /// Default is `SubWindow` when not specified. Use `UIAbility` for the main window.
   fn with_window_kind(self, kind: OHOSWindowKind) -> Self;
 
   /// Returns the current OHOS window kind, if set.
