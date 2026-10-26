@@ -30,6 +30,7 @@ pub enum ProgressState {
   Error,
 }
 
+/// A progress bar state and progress value to expose on the taskbar or dock icon.
 pub struct ProgressBarState {
   /// The progress bar state.
   pub state: Option<ProgressState>,
@@ -1652,6 +1653,7 @@ pub enum Theme {
   Dark,
 }
 
+/// The type of user attention to request on the window.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UserAttentionType {
@@ -1688,6 +1690,8 @@ pub struct WindowSizeConstraints {
 }
 
 impl WindowSizeConstraints {
+  /// Creates new size constraints from the given minimum and maximum sizes;
+  /// `None` leaves the corresponding bound unconstrained.
   pub fn new(
     min_width: Option<PixelUnit>,
     min_height: Option<PixelUnit>,

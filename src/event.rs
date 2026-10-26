@@ -624,6 +624,8 @@ impl Clone for WindowEvent<'static> {
 }
 
 impl<'a> WindowEvent<'a> {
+  /// If the event doesn't contain a reference, turn it into an event with a `'static` lifetime.
+  /// Otherwise, return `None`.
   pub fn to_static(self) -> Option<WindowEvent<'static>> {
     use self::WindowEvent::*;
     match self {
@@ -857,6 +859,7 @@ pub struct KeyEvent {
   /// See also: `text_with_all_modifiers()`
   pub text: Option<&'static str>,
 
+  /// Represents the physical location of the key on the keyboard (standard, left, right or numpad).
   pub location: keyboard::KeyLocation,
   /// Whether the key was pressed or released.
   pub state: ElementState,

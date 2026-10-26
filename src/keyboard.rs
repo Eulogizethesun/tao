@@ -514,6 +514,7 @@ pub enum KeyCode {
   ///
   /// This also the "back" button (triangle) on Android.
   BrowserBack,
+  /// The browser favorites or bookmarks key.
   BrowserFavorites,
   /// Some laptops place this key to the right of the <kbd>↑</kbd> key.
   BrowserForward,
