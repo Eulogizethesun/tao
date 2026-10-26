@@ -691,8 +691,9 @@ struct CreationAttrPlan {
 /// produce no extra traffic).
 ///
 /// #238 (design D7): on a main window (`is_main`) the three decoration-button
-/// bits are NOT seeded — the buttons are OS-managed and per-button
-/// configuration does not exist on the platform. Only `resizable`
+/// bits are NOT seeded — the buttons are OS-managed and the platform exposes
+/// no API for these enable/disable semantics (button visibility/style APIs
+/// exist; operation control does not). Only `resizable`
 /// participates on the main window (it has a real surface:
 /// set_resize_by_drag + the programmatic-resize gate). Runtime setters on the
 /// main window error out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
@@ -1770,7 +1771,8 @@ impl Window {
   /// Whether this window's decoration buttons are OS-managed (issue
   /// Eulogizethesun/tauri#238): every UIAbility-container window (the
   /// bootstrap main window AND later spawned UIAbility instances — both get
-  /// system-provided decorations with no per-button control API). Matches the
+  /// system-provided decorations, with no API mapping to the per-button
+  /// enable/disable flag semantics). Matches the
   /// ArkTS `isUIAbilityMainWindow` gate, which throws for the same reason.
   fn is_ui_ability_main_window(&self) -> bool {
     matches!(self.kind, OHOSWindowKind::UIAbility)
@@ -1778,7 +1780,9 @@ impl Window {
 
   pub fn set_minimizable(&self, minimizable: bool) {
     // Issue Eulogizethesun/tauri#238: the main window's decoration buttons are
-    // OS-managed — OpenHarmony exposes no per-button enable/disable API. The
+    // OS-managed — OpenHarmony exposes no API mapping to the per-button
+    // enable/disable flag semantics (visibility/style APIs exist; operation
+    // control does not). The
     // former silent bit-write + LocalStorage dispatch faked success (and the
     // bit was never consulted for UIAbility windows anyway). Honest no-op
     // here (tao stays void, upstream-aligned); the user-visible Err surfaces
