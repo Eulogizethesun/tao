@@ -438,7 +438,7 @@ impl LayoutCache {
         0,
         Some(locale_id),
       );
-      if wide_len < 0 {
+      if wide_len < 0i32 {
         // If it's dead, we run `ToUnicode` again to consume the dead-key
         wide_len = ToUnicodeEx(
           u32::from(vkey.0),
@@ -448,7 +448,7 @@ impl LayoutCache {
           0,
           Some(locale_id),
         );
-        if wide_len > 0 {
+        if wide_len > 0i32 {
           let os_string = OsString::from_wide(&label_wide[0..wide_len as usize]);
           if let Ok(label_str) = os_string.into_string() {
             if let Some(ch) = label_str.chars().next() {
@@ -458,7 +458,7 @@ impl LayoutCache {
         }
         return ToUnicodeResult::Dead(None);
       }
-      if wide_len > 0 {
+      if wide_len > 0i32 {
         let os_string = OsString::from_wide(&label_wide[0..wide_len as usize]);
         if let Ok(label_str) = os_string.into_string() {
           return ToUnicodeResult::Str(label_str);

@@ -19,7 +19,7 @@ fn main() {
 
   let window = WindowBuilder::new()
     .with_title("Hit space to toggle decorations.")
-    .with_inner_size(LogicalSize::new(400.0, 200.0))
+    .with_inner_size(LogicalSize::new(400.0f64, 200.0f64))
     .with_decorations(decorations)
     .build(&event_loop)
     .unwrap();

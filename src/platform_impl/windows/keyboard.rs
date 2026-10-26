@@ -684,8 +684,8 @@ struct KeyLParam {
 }
 
 fn destructure_key_lparam(lparam: LPARAM) -> KeyLParam {
-  let previous_state = (lparam.0 >> 30) & 0x01;
-  let transition_state = (lparam.0 >> 31) & 0x01;
+  let previous_state = (lparam.0 >> 30i32) & 0x01;
+  let transition_state = (lparam.0 >> 31i32) & 0x01;
   KeyLParam {
     scancode: ((lparam.0 >> 16) & 0xFF) as u8,
     extended: ((lparam.0 >> 24) & 0x01) != 0,
