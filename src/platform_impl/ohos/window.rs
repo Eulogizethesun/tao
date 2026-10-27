@@ -652,10 +652,24 @@ struct CreationAttrPlan {
   /// Seed `set_always_on_top(true)` — default `false`, so only a builder
   /// `true` fires.
   always_on_top: bool,
+  /// Local mirror bitfield — stored into `Window::decoration_flags` whenever
+  /// it differs from the `FLAG_ALL_DECORATIONS` default (the `set_maximized`
+  /// FLAG_MAXIMIZABLE guard and the `set_inner_size` FLAG_RESIZABLE gate read
+  /// that cache). Recorded for BOTH window kinds, decoupled from the
+  /// `set_window_decoration_flags` dispatch below.
+  mirror_flags: u8,
   /// Seed `set_window_decoration_flags` with the attr-derived bitfield;
   /// `None` = identical to the `FLAG_ALL_DECORATIONS` default → zero
-  /// dispatch.
+  /// dispatch. Always `None` on a main window: the ArkTS setDecorationFlags
+  /// handler throws for a UIAbility main window (issue
+  /// Eulogizethesun/tauri#238), so a dispatch there is a guaranteed-fail
+  /// warn — sub-windows only.
   decoration_flags: Option<u8>,
+  /// Main-window resize seed (#238 design D7 + issue Eulogizethesun/tauri#104):
+  /// `Some(false)` when `attrs.resizable` is `false` — the resizable attr's
+  /// real main-window surface (the edge-drag switch), the same leg the runtime
+  /// `set_resizable` dispatches. `None` = zero dispatch.
+  resize_by_drag: Option<bool>,
   /// Replay `set_fullscreen` — upstream windows backend form
   /// (windows/window.rs:1338-1339): fullscreen takes precedence over
   /// maximized (else-if).
@@ -685,15 +699,19 @@ struct CreationAttrPlan {
 /// `WindowAttributes` plans zero dispatches (spec: default attributes
 /// produce no extra traffic).
 ///
-/// #238 (design D7): on a main window (`is_main`) the three decoration-button
-/// bits are NOT seeded — the buttons are OS-managed and the platform exposes
-/// no API for these enable/disable semantics (button visibility/style APIs
-/// exist; operation control does not). Only `resizable`
-/// participates on the main window (it has a real surface:
-/// set_resize_by_drag + the programmatic-resize gate). Runtime setters on the
-/// main window error out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
-/// always passes there — "always maximizable" is the disclosed consistent
-/// reading (D7).
+/// #238 (design D7): on a main window (`is_main`) nothing rides
+/// `set_window_decoration_flags` — the ArkTS handler throws for a UIAbility
+/// main window (the buttons are OS-managed and the platform exposes no API
+/// for these enable/disable semantics; button visibility/style APIs exist,
+/// operation control does not). The decoration bits are still cached locally
+/// ([`CreationAttrPlan::mirror_flags`]: the set_maximized(true)
+/// FLAG_MAXIMIZABLE guard and the set_inner_size FLAG_RESIZABLE gate read
+/// that cache), and the one attr with a real main-window surface is
+/// `resizable`: `false` seeds `set_resize_by_drag(false)` (issue
+/// Eulogizethesun/tauri#104), the same leg the runtime `set_resizable`
+/// dispatches. Runtime setters on the main window error out, so the
+/// set_maximized(true) FLAG_MAXIMIZABLE guard always passes there — "always
+/// maximizable" is the disclosed consistent reading (D7).
 fn creation_attr_plan(attrs: &window::WindowAttributes, is_main: bool) -> CreationAttrPlan {
   let mut flags = FLAG_ALL_DECORATIONS;
   if !attrs.resizable {
@@ -712,8 +730,17 @@ fn creation_attr_plan(attrs: &window::WindowAttributes, is_main: bool) -> Creati
   }
   CreationAttrPlan {
     always_on_top: attrs.always_on_top,
-    decoration_flags: if flags != FLAG_ALL_DECORATIONS {
+    mirror_flags: flags,
+    // #238: a main window never dispatches decoration flags (guaranteed
+    // ArkTS throw) — its resizable attr rides `resize_by_drag` instead, and
+    // its button bits are OS-managed with no surface at all.
+    decoration_flags: if !is_main && flags != FLAG_ALL_DECORATIONS {
       Some(flags)
+    } else {
+      None
+    },
+    resize_by_drag: if is_main && !attrs.resizable {
+      Some(false)
     } else {
       None
     },
@@ -1234,10 +1261,21 @@ impl Window {
       );
     }
     let plan = creation_attr_plan(attrs, is_main);
-    // Decoration flags first: set_maximized's guard reads FLAG_MAXIMIZABLE
-    // from this cache, so the cache must be in place before the replay half.
+    // Local mirror first: set_maximized's guard reads FLAG_MAXIMIZABLE and
+    // set_inner_size's gate reads FLAG_RESIZABLE from this cache, so the
+    // cache must be in place before the replay half. Decoupled from the
+    // dispatch below (#238): a main window caches its attr bits (the
+    // resizable clear included) without any decoration dispatch.
+    if plan.mirror_flags != FLAG_ALL_DECORATIONS {
+      self
+        .decoration_flags
+        .store(plan.mirror_flags, Ordering::Release);
+    }
+    // Sub-window decoration seed: #238 — the ArkTS setDecorationFlags handler
+    // throws for a UIAbility main window, so only sub-windows dispatch this
+    // command (the main window's resizable attr rides the set_resize_by_drag
+    // seed below; its button bits are OS-managed with no surface at all).
     if let Some(flags) = plan.decoration_flags {
-      self.decoration_flags.store(flags, Ordering::Release);
       if let Some(window_id) = self.window_id {
         if let Some(client) = self.bridge_client("seed_creation_attrs") {
           self.spawn_or_queue(async move {
@@ -1265,6 +1303,38 @@ impl Window {
             {
               log::warn!(
                 "[tao-ohos] set_window_decoration_flags (creation seed, deferred) failed for window {}: {:?}",
+                window_id,
+                e
+              );
+            }
+          });
+        }
+      }
+    }
+    // Main-window resize seed (#238 design D7): `resizable(false)` has a real
+    // main-window surface only in the edge-drag switch (issue
+    // Eulogizethesun/tauri#104) — the same `set_resize_by_drag` leg the
+    // runtime `set_resizable` dispatches, so the seed mirrors that call
+    // shape (spawn_or_queue + the T1 deferred fallback).
+    if let Some(drag) = plan.resize_by_drag {
+      if let Some(window_id) = self.window_id {
+        if let Some(client) = self.bridge_client("seed_creation_attrs") {
+          self.spawn_or_queue(async move {
+            if let Err(e) = client.set_resize_by_drag(window_id, drag).await {
+              log::warn!(
+                "[tao-ohos] set_resize_by_drag (creation seed) failed for window {}: {:?}",
+                window_id,
+                e
+              );
+            }
+          });
+        } else {
+          // PR review fix T1: defer with a replay-time client resolution —
+          // see the sub-window decoration leg above.
+          self.spawn_or_queue_deferred("seed_creation_attrs", move |client| async move {
+            if let Err(e) = client.set_resize_by_drag(window_id, drag).await {
+              log::warn!(
+                "[tao-ohos] set_resize_by_drag (creation seed, deferred) failed for window {}: {:?}",
                 window_id,
                 e
               );
@@ -2865,6 +2935,8 @@ mod tests {
   /// set-decoration-flags seed carrying the attr-derived bitfield — each
   /// false attr clears exactly its own bit (the maximizable clear matters
   /// downstream: set_maximized(true)'s guard reads FLAG_MAXIMIZABLE).
+  /// Sub-window leg (`is_main = false`) — the dispatch and the local mirror
+  /// stay coupled there; the main window diverges (see the #238 test below).
   #[test]
   fn ut_creation_plan_seeds_decoration_flags_when_attrs_differ() {
     let mut attrs = window::WindowAttributes::default();
@@ -2897,42 +2969,60 @@ mod tests {
   }
 
   /// UT for #168 (c): default attributes plan zero dispatches — the spec's
-  /// "default attributes produce no extra traffic" scenario.
+  /// "default attributes produce no extra traffic" scenario, on both window
+  /// kinds (the mirror bitfield stays at its default too, so the decoupled
+  /// mirror store at the call site is skipped).
   #[test]
   fn ut_creation_plan_default_attrs_produce_zero_seeds() {
-    let attrs = window::WindowAttributes::default();
-    let plan = creation_attr_plan(&attrs, false);
-    assert!(!plan.always_on_top, "default always_on_top must not seed");
-    assert_eq!(
-      plan.decoration_flags, None,
-      "default decoration flags must not seed"
-    );
-    assert!(
-      plan.fullscreen.is_none(),
-      "default fullscreen must not replay"
-    );
-    assert!(!plan.maximized, "default maximized must not replay");
-    assert!(
-      !plan.no_initial_focus,
-      "default focused(true) must not seed a focusable flip"
-    );
+    for is_main in [false, true] {
+      let attrs = window::WindowAttributes::default();
+      let plan = creation_attr_plan(&attrs, is_main);
+      assert!(!plan.always_on_top, "default always_on_top must not seed");
+      assert_eq!(
+        plan.decoration_flags, None,
+        "default decoration flags must not seed"
+      );
+      assert_eq!(
+        plan.mirror_flags, FLAG_ALL_DECORATIONS,
+        "default attrs must not move the local mirror off its default"
+      );
+      assert!(
+        plan.resize_by_drag.is_none(),
+        "default resizable(true) must not seed a resize_by_drag flip"
+      );
+      assert!(
+        plan.fullscreen.is_none(),
+        "default fullscreen must not replay"
+      );
+      assert!(!plan.maximized, "default maximized must not replay");
+      assert!(
+        !plan.no_initial_focus,
+        "default focused(true) must not seed a focusable flip"
+      );
+    }
   }
 
-  /// UT for #238 (design D7): the main window's creation-attr button seeds are
-  /// ignored — the three decoration buttons are OS-managed. The sub-window
-  /// path (`is_main = false`, exercised by the #168 tests above) keeps the
-  /// per-bit seeding.
+  /// UT for #238 (design D7): the main window never plans a
+  /// set_window_decoration_flags dispatch — the ArkTS handler throws for a
+  /// UIAbility main window, so a dispatch there is a guaranteed-fail warn.
+  /// The sub-window path (`is_main = false`, exercised by the #168 tests
+  /// above) keeps the per-bit seeding.
   #[test]
-  fn ut_creation_plan_main_window_ignores_button_seeds() {
+  fn ut_creation_plan_main_window_no_decoration_dispatch_resize_drag_seed() {
     // Brief:
     // 1. Main-window attrs with all three button bits false must plan NO
-    //    decoration seed (OS-managed buttons — warn+ignore at the call site).
-    // 2. resizable(false) on the main window still plans a seed carrying ONLY
-    //    the resizable bit clear (real surface: set_resize_by_drag + the
-    //    programmatic-resize gate; D7 disclosure keeps the set_maximized
-    //    guard passing).
-    // 3. The same button attrs on a sub window (is_main = false) keep
-    //    today's per-bit seed (no behavior change there).
+    //    decoration dispatch and leave the mirror at the all-ones default
+    //    (OS-managed buttons — warn+ignore at the call site).
+    // 2. resizable(false) on the main window must NOT plan a decoration
+    //    dispatch (guaranteed ArkTS throw) — instead it plans the
+    //    set_resize_by_drag(false) seed leg (#104) while the mirror keeps
+    //    ONLY the resizable bit cleared (the programmatic-resize gate in
+    //    set_inner_size reads that cache; the D7 disclosure keeps the
+    //    set_maximized guard passing).
+    // 3. resizable(true) (the default) on the main window plans no resize
+    //    seed — default attrs produce zero traffic.
+    // 4. The same button attrs on a sub window (is_main = false) keep
+    //    today's per-bit seed and its coupled mirror (no behavior change).
     let mut attrs = window::WindowAttributes::default();
     attrs.minimizable = false;
     attrs.maximizable = false;
@@ -2940,7 +3030,15 @@ mod tests {
     let plan = creation_attr_plan(&attrs, true);
     assert_eq!(
       plan.decoration_flags, None,
-      "main-window button seeds must be ignored (OS-managed buttons)"
+      "main-window button seeds must not dispatch decoration flags (OS-managed buttons)"
+    );
+    assert_eq!(
+      plan.mirror_flags, FLAG_ALL_DECORATIONS,
+      "main-window button bits stay cached at the all-ones default"
+    );
+    assert!(
+      plan.resize_by_drag.is_none(),
+      "button attrs must not plan a resize_by_drag seed"
     );
 
     let mut attrs = window::WindowAttributes::default();
@@ -2948,9 +3046,25 @@ mod tests {
     attrs.minimizable = false;
     let plan = creation_attr_plan(&attrs, true);
     assert_eq!(
-      plan.decoration_flags,
-      Some(FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE),
-      "main-window resizable(false) must seed only the resizable bit"
+      plan.decoration_flags, None,
+      "main-window resizable(false) must NOT dispatch decoration flags (guaranteed ArkTS throw)"
+    );
+    assert_eq!(
+      plan.mirror_flags,
+      FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE,
+      "main-window resizable(false) must still cache only the resizable bit clear (set_inner_size gate)"
+    );
+    assert_eq!(
+      plan.resize_by_drag,
+      Some(false),
+      "main-window resizable(false) must seed the set_resize_by_drag(false) leg (#104)"
+    );
+
+    let attrs = window::WindowAttributes::default();
+    let plan = creation_attr_plan(&attrs, true);
+    assert!(
+      plan.resize_by_drag.is_none(),
+      "main-window resizable(true) must not seed set_resize_by_drag"
     );
 
     let mut attrs = window::WindowAttributes::default();
@@ -2961,6 +3075,15 @@ mod tests {
       plan.decoration_flags,
       Some(FLAG_ALL_DECORATIONS & !(FLAG_MINIMIZABLE | FLAG_CLOSABLE)),
       "sub-window button seeds keep the per-bit behavior"
+    );
+    assert_eq!(
+      plan.mirror_flags,
+      FLAG_ALL_DECORATIONS & !(FLAG_MINIMIZABLE | FLAG_CLOSABLE),
+      "sub-window mirror stays coupled to the dispatch payload"
+    );
+    assert!(
+      plan.resize_by_drag.is_none(),
+      "sub-windows keep the decoration-flags resizable leg, no resize_by_drag seed"
     );
   }
 
