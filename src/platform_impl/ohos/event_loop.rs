@@ -785,7 +785,7 @@ impl<T: 'static> EventLoop<T> {
     // #173: mirror the per-window focused bit through WINDOW_MIRRORS (miss
     // tolerated — the window may have dropped between event and write).
     super::window::set_mirror_focused(window_id, true);
-    // #180(a) (design D7): sync the shared change-edge snapshot so the Float
+    // #180(a) (design D7): sync the shared change-edge snapshot so the sub-window
     // drain path and this stage path dedup duplicate edges against the same
     // record (cross-path repeats are swallowed the same way).
     LAST_FOCUSED_WINDOW_ID.store(window_id, Ordering::Relaxed);
@@ -854,7 +854,7 @@ impl<T: 'static> EventLoop<T> {
   /// #180(a) (design D7): the single blur write face — per-window mirror bit
   /// (#173 write face) + the `Focused(false)` event. Shared by the stage
   /// LostFocus arm (which additionally clears the app-level HAS_FOCUS bit)
-  /// and the Float drain's paired-blur synthesis (which must NOT touch
+  /// and the sub-window drain's paired-blur synthesis (which must NOT touch
   /// HAS_FOCUS — the ability may still hold focus, and the pair is completed
   /// by the immediately following gain on the new window). Extracted so the
   /// two callers cannot drift.
@@ -1014,7 +1014,7 @@ impl<T: 'static> EventLoop<T> {
         match mirror {
           Some(mirror) => mirror.apply_window_status(status),
           None => {
-            // G6 / cross-cutting: a failed Float window has window_id=None
+            // G6 / cross-cutting: a failed sub-window has window_id=None
             // (never registered, produces no status events), so an unmatched
             // drained status means a real window was destroyed between
             // enqueue and drain (stale id). Non-zero ids are diagnosable
@@ -1037,7 +1037,7 @@ impl<T: 'static> EventLoop<T> {
         }
       }
 
-      // #180(a) (design D7): Float sub-window focus edges (SubWindowPage windowEvent
+      // #180(a) (design D7): sub-window focus edges (SubWindowPage windowEvent
       // WINDOW_ACTIVE/WINDOW_INACTIVE → notifyWindowFocus) drain next to the
       // status backfill and run through the same change-edge dedup +
       // paired-blur synthesis the stage arms share.
@@ -1129,7 +1129,7 @@ impl<T: 'static> EventLoop<T> {
           // RedrawRequested is driven by the XComponent frame callback, keyed
           // by the window that called render() (Phase 4 design.md D5). In
           // practice that is the primary only — spawned UIAbility windows
-          // and Float sub-windows own no XComponent.
+          // and sub-windows own no XComponent.
           call_event_handler!(
             event_loop_cell,
             event::Event::RedrawRequested(window::WindowId(WindowId(window_id)))
@@ -1146,7 +1146,7 @@ impl<T: 'static> EventLoop<T> {
           // never fired. Diff against the last dispatched rect per window:
           // - position change → Moved, size change → Resized (both when both);
           // - first rect for a window seeds the cache and still dispatches the
-          //   legacy Resized (Float sub-windows have no XComponent surface, so
+          //   legacy Resized (sub-windows have no XComponent surface, so
           //   this event is their only initial-size signal);
           // - degenerate rects (minimize/hide collapse to 0×0) only update the
           //   cache — dispatching Resized(0,0) would corrupt downstream bounds.
@@ -1243,7 +1243,7 @@ impl<T: 'static> EventLoop<T> {
           // field — including on not-yet-refocused windows; the next
           // focus gainer is the correction point.
           HAS_FOCUS.store(false, Ordering::Relaxed);
-          // #180(a) (design D7): the blur write face is shared with the Float
+          // #180(a) (design D7): the blur write face is shared with the sub-window
           // drain's paired-blur synthesis (apply_blur), and the shared
           // change-edge snapshot records the holder clearing so cross-path
           // duplicate edges dedup the same way.
@@ -1254,14 +1254,14 @@ impl<T: 'static> EventLoop<T> {
           // Configuration changes are app-level (EnvironmentCallback), not tied to a
           // specific window. Broadcast to every live window like ThemeChanged
           // below (scale is app-global on OHOS; WINDOW_MIRRORS covers main +
-          // spawned UIAbility + Float sub-windows, with a window-0 fallback
+          // spawned UIAbility + sub-windows, with a window-0 fallback
           // before any window exists). Each window gets its own
           // `new_inner_size` slot so one handler's adjustment cannot leak
           // into the next window's event. The size is the window's OWN inner
           // rect (`inner_rect_for`, the same source as the Resized dispatch
           // in the ContentRectChange arm above — issue Eulogizethesun/tauri#97),
-          // not the primary's geometry broadcast to everyone: a spawned or
-          // Float window must be offered its own drawable size to resize to.
+          // not the primary's geometry broadcast to everyone: a spawned window or a
+          // sub-window must be offered its own drawable size to resize to.
           // Degradation: `inner_rect_for` returns (0,0,0,0) before a window's
           // first readable windowRectChange, so fall back to the app-level
           // content rect then (the same pre-geometry degradation the Resized
@@ -1303,7 +1303,7 @@ impl<T: 'static> EventLoop<T> {
           // any ConfigChanged — initial color_mode is NoSet), so it also emits;
           // apps re-applying the current theme on that first event is harmless.
           // Dispatched to every live window (theme is app-global on OHOS; the
-          // registry covers main + Float sub-windows).
+          // registry covers main + sub-windows).
           let theme = effective_theme(&app);
           let theme_bits = match theme {
             Theme::Dark => EFFECTIVE_THEME_DARK,
@@ -1358,7 +1358,7 @@ impl<T: 'static> EventLoop<T> {
           // close+destroy pair, a spawned instance's teardown reaches its own
           // window so tauri-runtime-wry removes the store entry (D13 cleanup;
           // its close path is idempotent against the already-terminating
-          // ability). Float sub-windows are destroyed via the separate ArkTS
+          // ability). Sub-windows are destroyed via the separate ArkTS
           // destroyWindow() path drained by tauri-runtime-wry's
           // drain_pending_window_closes().
           call_event_handler!(
@@ -2306,7 +2306,7 @@ mod focus_scale_tests {
     LAST_FOCUSED_WINDOW_ID.load(Ordering::Relaxed)
   }
 
-  /// UT for #180(a) step 1 (design D7): a first Float gain edge forwards
+  /// UT for #180(a) step 1 (design D7): a first sub-window gain edge forwards
   /// Focused(true); a gain edge over a still-focused previous holder
   /// pair-clears it first (mirror bit + synthesized Focused(false)) — the
   /// paired semantics that keep ArkTS fast-switches (ACTIVE without a
@@ -2472,10 +2472,10 @@ mod focus_scale_tests {
       .remove(&OTHER);
   }
 
-  /// UT for #180(a) step 3 (design D7): the stage path and the Float drain share
+  /// UT for #180(a) step 3 (design D7): the stage path and the sub-window drain share
   /// LAST_FOCUSED_WINDOW_ID — a stage gain (handle_gained_focus) syncs the
   /// snapshot the drain dedups against, so a cross-path duplicate gain edge
-  /// for the same window is swallowed, while a Float gain over the
+  /// for the same window is swallowed, while a sub-window gain over the
   /// stage-focused window still pair-clears it.
   #[test]
   fn ut_focus_stage_and_float_share_edge_snapshot() {
@@ -2507,7 +2507,7 @@ mod focus_scale_tests {
     );
     assert!(stage_mirror.focused.load(Ordering::SeqCst));
 
-    // Cross-path duplicate: a Float drain gain for the same window (already
+    // Cross-path duplicate: a sub-window drain gain for the same window (already
     // recorded by the stage path) is swallowed.
     let events = run_collected::<()>(|cell| {
       EventLoop::<()>::handle_pending_window_focus(cell, STAGE, true);
@@ -2517,7 +2517,7 @@ mod focus_scale_tests {
       "cross-path duplicate gain must be swallowed"
     );
 
-    // Float gain over the stage-focused window: paired blur on STAGE first.
+    // Sub-window gain over the stage-focused window: paired blur on STAGE first.
     let events = run_collected::<()>(|cell| {
       EventLoop::<()>::handle_pending_window_focus(cell, FLOAT, true);
     });
@@ -2527,7 +2527,7 @@ mod focus_scale_tests {
         format!("focus:{STAGE}:false"),
         format!("focus:{FLOAT}:true")
       ],
-      "Float gain over the stage holder must pair-clear it first"
+      "sub-window gain over the stage holder must pair-clear it first"
     );
     assert!(!stage_mirror.focused.load(Ordering::SeqCst));
     assert!(float_mirror.focused.load(Ordering::SeqCst));

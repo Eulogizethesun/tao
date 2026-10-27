@@ -280,13 +280,13 @@ type PendingWindowOp = Box<dyn FnOnce() + Send + 'static>;
 
 /// Window ops dispatched to a window before its creation handshake completes
 /// — the "Unknown OS sub-window" race window. Two gated populations: spawned
-/// UIAbility windows awaiting stage registration (issue 7), and Float
+/// UIAbility windows awaiting stage registration (issue 7), and the
 /// sub-windows awaiting the ArkTS creation chain to settle (issue-7 addendum; gated
 /// only when the ProcessInitializer capability handshake armed the Rust-side
-/// registry — a stale HAR keeps Float ops on the old fire-and-forget path).
+/// registry — a stale HAR keeps sub-window ops on the old fire-and-forget path).
 /// Keyed by OHOS window id, FIFO per window. Drained by the event loop
 /// ([`drain_ready_pending_window_ops`]) whenever the D7 registration waker or
-/// the Float settle waker fires, or inline by [`Window::dispatch_or_queue`]
+/// the sub-window settle waker fires, or inline by [`Window::dispatch_or_queue`]
 /// when registration lands between its ready-check and push (push-then-check,
 /// the same TOCTOU discipline as wry's pending_ops).
 static PENDING_WINDOW_OPS: std::sync::LazyLock<
@@ -294,7 +294,7 @@ static PENDING_WINDOW_OPS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Event-loop drain (called on every MainEvent dispatch after a D7
-/// registration waker or Float settle waker wakes the loop): replay queued
+/// registration waker or sub-window settle waker wakes the loop): replay queued
 /// ops for every window whose creation handshake completed. Ready ids are
 /// collected under the queue lock and replayed outside it — each op
 /// self-spawns on the bridge executor and must not run with the lock held.
@@ -859,7 +859,7 @@ impl Window {
           return Err(os_error!(OsError));
         }
         let window_id = openharmony_ability::next_window_id();
-        // Capability handshake (G15, mirrors the Float registry's
+        // Capability handshake (G15, mirrors the sub-window registry's
         // create_os_window gate): only open a pending entry when the ArkTS
         // ProcessInitializer has armed UIAbility pending tracking. A stale
         // HAR (fresh .so, cached ArkTS) never arms it — and
@@ -995,7 +995,7 @@ impl Window {
       };
       match create_os_window(params) {
         Ok(id) => {
-          // Float creation race (issue-7 addendum): create_os_window opened a pending
+          // Sub-window creation race (issue-7 addendum): create_os_window opened a pending
           // registry entry for this id (capability handshake permitting) before
           // dispatching the TSFN; attach the event-loop waker NOW so the settle
           // notify (notify_float_window_registered) wakes the loop and replays
@@ -1185,7 +1185,7 @@ impl Window {
   }
 
   /// Dispatch a window op to the bridge executor, or queue it if the target
-  /// is still awaiting its creation handshake (issue 7 + Float race): ops
+  /// is still awaiting its creation handshake (issue 7 + sub-window race): ops
   /// fired in that window reach ArkTS before `requireWindow` can find the
   /// window and are silently dropped ("Unknown OS sub-window", or a silent
   /// no-op for set-limits which does not go through requireWindow). Mirrors
@@ -1193,7 +1193,7 @@ impl Window {
   ///
   /// The fast path stays synchronous for every window that cannot race: the
   /// main window (id 0) and unknown ids (UIAbility ids for a fresh tao
-  /// process, zombie ids) all read as ready. Float sub-windows are gated from
+  /// process, zombie ids) all read as ready. Sub-windows are gated from
   /// `create_os_window` until the ArkTS creation chain settles — but only
   /// when the ProcessInitializer capability handshake armed the registry
   /// (stale-HAR builds keep the old fire-and-forget fast path).
@@ -1374,7 +1374,7 @@ impl Window {
   /// compensates with the precise system chrome from one
   /// `getWindowProperties()` snapshot — the same algorithm as `resize-inner`
   /// (`chrome = windowRect − drawableRect` per axis). Non-zero slots only (0
-  /// = no limit stays 0); Float sub-windows are decorEnabled:false so their
+  /// = no limit stays 0); sub-windows are decorEnabled:false so their
   /// chrome is 0 by construction; when the main-window snapshot is unreadable
   /// (e.g. the builder-time dispatch racing content load) the ArkTS side
   /// degrades to uncompensated inner-sized limits with a WARN instead of
@@ -1434,7 +1434,7 @@ impl Window {
   pub fn id(&self) -> WindowId {
     // Phase 3 (design.md D6): return this window's own OHOS windowId instead of
     // the ZST constant, so tauri-runtime-wry's window_id_map routes events to the
-    // correct WindowWrapper. Main window → WindowId(0), Float sub-window → WindowId(N).
+    // correct WindowWrapper. Main window → WindowId(0), sub-window → WindowId(N).
     WindowId(self.window_id.unwrap_or(0))
   }
 
@@ -1450,8 +1450,8 @@ impl Window {
   pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, error::NotSupportedError> {
     // Inner (content-area) position — computed inside openharmony-ability under
     // one lock from the system's drawableRect snapshot (issue
-    // Eulogizethesun/tauri#97): window position + drawable offset. Float
-    // sub-windows get offset (0,0) naturally (no system title bar).
+    // Eulogizethesun/tauri#97): window position + drawable offset. Sub-windows
+    // get offset (0,0) naturally (no system title bar).
     // (G7: the mirrored rects track the MAIN window, so this getter is only
     // meaningful for main/UIAbility windows regardless.)
     let rect = self.app.inner_rect_for(self.window_id.unwrap_or(0));
@@ -1612,7 +1612,7 @@ impl Window {
   }
 
   pub fn set_title(&self, title: &str) {
-    // OHOS setWindowTitle (API 9+, callback form). Main window + Float sub-windows
+    // OHOS setWindowTitle (API 9+, callback form). Main window + sub-windows
     // both support title text. Only visible when decorations enabled (decorEnabled=true).
     // Icon is NOT changeable at runtime.
     if let Some(window_id) = self.window_id {
@@ -1710,7 +1710,7 @@ impl Window {
       });
       // The main window (window_id = 0) is dispatched too — the ArkTS side
       // routes by kind (issue Eulogizethesun/tauri#105): main window uses
-      // window.shiftAppWindowFocus (11+, works for main/sub windows), Float
+      // window.shiftAppWindowFocus (11+, works for main/sub windows), and the
       // sub-windows keep raiseToAppTop (14+, subwindow-only by contract).
     }
   }
@@ -1719,7 +1719,7 @@ impl Window {
     if let Some(window_id) = self.window_id {
       // #174 (2026-10-21 device arbitration): the `window_id > 0` gate that
       // historically no-op'd the main window is removed — the main window
-      // (id 0) dispatches through the same bridge path as Float sub-windows.
+      // (id 0) dispatches through the same bridge path as sub-windows.
       // The OS arbitrates: `win.setFocusable` (WindowPlugin.ets set-focusable
       // action) succeeds on the main window (probe evidence in the phase
       // report); a rejection surfaces as the structured warn below. The
@@ -1754,7 +1754,7 @@ impl Window {
     }
   }
 
-  /// Destroys the OS-level window: Float sub-windows call `destroyWindow`.
+  /// Destroys the OS-level window: sub-windows call `destroyWindow`.
   /// The main (UIAbility) window is system-managed: the bridge's
   /// `destroy-window` handler rejects window id 0, so for the main window
   /// this is a rejected fire-and-forget (logged as a warning) — the ability
@@ -1798,8 +1798,8 @@ impl Window {
   }
 
   // TODO(issue 4 residual, partially addressed): set_minimizable/set_maximizable/
-  // set_closable only control decoration button visibility (Float
-  // @LocalStorageProp) and do not block the programmatic APIs; the main window
+  // set_closable only control decoration button visibility (the
+  // SubWindowPage @LocalStorageProp) and do not block the programmatic APIs; the main window
   // errors out for them (issue Eulogizethesun/tauri#238 — the buttons are
   // OS-managed). set_resizable is the exception since issue
   // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
@@ -1809,12 +1809,12 @@ impl Window {
   pub fn set_resizable(&self, resizable: bool) {
     self.set_decoration_flag(FLAG_RESIZABLE, resizable);
     // Issue Eulogizethesun/tauri#104: the decoration flag only covers
-    // title-bar button visibility (Float sub-windows; no-op on the main
+    // title-bar button visibility (sub-windows; no-op on the main
     // window) and the programmatic-resize gate (set_inner_size checks
     // FLAG_RESIZABLE). The actual user-facing switch is edge-drag resizing —
     // dispatched through the bridge: main (UIAbility) window →
     // setResizeByDragEnabled (API 14+, effective in free-window state),
-    // Float sub-window → enableDrag (API 20+). Failure is logged and ignored
+    // sub-window → enableDrag (API 20+). Failure is logged and ignored
     // on API levels without the call (ArkTS guards with a clear error).
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_resizable") else {
@@ -2113,7 +2113,7 @@ impl Window {
   pub fn set_always_on_top(&self, always_on_top: bool) {
     // Records intent (is_always_on_top reads this) AND dispatches to OHOS
     // setWindowTopmost (API 14+, needs ohos.permission.WINDOW_TOPMOST) via the
-    // window bridge facade. Main window only per OHOS docs; Float sub-windows
+    // window bridge facade. Main window only per OHOS docs; sub-windows
     // will error (caught + warned in ArkTS, non-fatal). Only effective in
     // freeform window mode.
     self.always_on_top.store(always_on_top, Ordering::Release);
@@ -2217,7 +2217,7 @@ impl Window {
 
   pub fn set_cursor_icon(&self, icon: window::CursorIcon) {
     // TODO(issue 6): dispatched but not yet device-tested — verify style mapping
-    //   coverage, touch-mode device behavior, and whether it works on Float
+    //   coverage, touch-mode device behavior, and whether it works on
     //   sub-windows. See doc/OHOS-window-residual-issues.md (issue 6).
     // Set cursor style by windowId (pointer.setPointerStyleSync), dispatched via
     // the window bridge facade fire-and-forget (ArkTS side delegates to
@@ -2433,7 +2433,7 @@ impl Window {
   }
   pub fn drag_window(&self) -> Result<(), error::ExternalError> {
     // OHOS startMoving (API14+) must be called in onTouch(TouchType.Down) —
-    // cannot be triggered programmatically from Rust. Float sub-windows drag
+    // cannot be triggered programmatically from Rust. Sub-windows drag
     // via SubWindowPage title bar onTouch→startMoving; the main UIAbility window
     // has no such path, so this is a no-op there. Returns Ok (no error) since
     // drag is handled at the UI layer (SubWindowPage), not via this API.
@@ -2636,7 +2636,7 @@ impl Drop for Window {
       // UIAbility pending-registry entry (waker included — mirrors the
       // start_ui_ability Err-leg rollback in `Window::new`; without it, an
       // entry whose spawn AMS silently swallowed stays registered with a
-      // live waker until process exit), and drop the Float pending-registry
+      // live waker until process exit), and drop the sub-window pending-registry
       // entry so a late settle notify no-ops instead of waking a dead id.
       // Both unregisters are idempotent no-ops for unknown ids (the primary
       // window's id 0 was never registered as pending).
