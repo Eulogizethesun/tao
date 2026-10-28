@@ -313,6 +313,15 @@ fn emit_synthetic_key<T: 'static>(
 /// `cursorPosition()` promise reject; app-side discipline (spec): catch →
 /// keep `set_ignore_cursor_events(true)`, only a hit-test match may set
 /// touchable.
+/// PR#28 review T28-10 (gate F11): process-global warn-once latch for the
+/// untracked-cursor fail-safe below. Hoisted from a fn-local static to module
+/// scope so the F11 UT can re-arm it — device UTs share one process and
+/// #[test]s run in parallel. In production the latch only "clears" by the
+/// first feed arriving (after which the read succeeds and this branch never
+/// fires again), so a single latch is sufficient; a UT reset merely re-opens
+/// the one warn slot.
+static UNTRACKED_CURSOR_WARNED: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn cursor_position_from_app(
   app: &OpenHarmonyApp,
 ) -> Result<PhysicalPosition<f64>, error::ExternalError> {
@@ -322,11 +331,9 @@ pub(crate) fn cursor_position_from_app(
     .map_err(|CursorUntracked| {
       // PR#28 review T28-10: a polling caller hits this branch on every read
       // while no mouse feed has ever arrived — warn once, then drop to debug,
-      // so the hilog cannot be flooded. The condition only clears by the
-      // first feed arriving (after which the read succeeds and this branch
-      // never fires again), so a single latch is sufficient.
-      static UNTRACKED_WARNED: AtomicBool = AtomicBool::new(false);
-      if !UNTRACKED_WARNED.swap(true, Ordering::Relaxed) {
+      // so the hilog cannot be flooded. See UNTRACKED_CURSOR_WARNED (gate F11
+      // hoisted the state to module scope for UT re-armability).
+      if !UNTRACKED_CURSOR_WARNED.swap(true, Ordering::Relaxed) {
         log::warn!("cursor_position: untracked (no mouse feed ever recorded) → NotSupported");
       } else {
         log::debug!("cursor_position: untracked (no mouse feed ever recorded) → NotSupported");
@@ -2595,5 +2602,115 @@ mod focus_scale_tests {
     );
 
     LAST_EFFECTIVE_SCALE.store(scale_before, Ordering::Relaxed);
+  }
+}
+
+/// PR#28 review gate F11: the T28-10 cursor warn-once latch had zero UT. A
+/// capturing logger is required because the ONLY observable difference
+/// between the first untracked read and the follow-ups is the log level —
+/// the mapped error is the same NotSupported every time. The logger is
+/// installed once per process (log::set_boxed_logger is one-shot) and
+/// records (level, message) pairs; other #[test]s may log concurrently, so
+/// the assertions filter on the exact untracked-cursor message.
+#[cfg(test)]
+mod cursor_untracked_tests {
+  use super::*;
+
+  static CAPTURED_LOGS: std::sync::LazyLock<
+    std::sync::Mutex<Vec<(log::Level, String)>>,
+  > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+  struct CaptureLogger;
+
+  impl log::Log for CaptureLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+      metadata.level() <= log::Level::Debug
+    }
+    fn log(&self, record: &log::Record) {
+      if let Ok(mut logs) = CAPTURED_LOGS.lock() {
+        logs.push((record.level(), record.args().to_string()));
+      }
+    }
+    fn flush(&self) {}
+  }
+
+  fn ensure_capture_logger() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+      // One-shot per process; if a logger is somehow already installed the
+      // Err is ignored and its records simply do not reach CAPTURED_LOGS
+      // (the asserts below would then fail loudly instead of passing
+      // vacuously).
+      let _ = log::set_boxed_logger(Box::new(CaptureLogger));
+      // The runtime max level starts gated: open it to Debug so the latch's
+      // degraded leg (log::debug!) is actually observable.
+      log::set_max_level(log::LevelFilter::Debug);
+    });
+  }
+
+  fn count_untracked_records(level: log::Level) -> usize {
+    CAPTURED_LOGS
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .iter()
+      .filter(|(l, msg)| *l == level && msg.starts_with("cursor_position: untracked"))
+      .count()
+  }
+
+  /// Gate F11: the T28-10 warn-once latch. The first untracked read in the
+  /// process logs at WARN, every later one degrades to DEBUG (hilog flood
+  /// guard); the mapped error is NotSupported in both legs. Precondition:
+  /// the process cursor statics (openharmony-ability EVER_FED) must still be
+  /// unfed — no other tao UT feeds the cursor, so the pristine state holds;
+  /// a feed from a future UT would fail the first assert below instead of
+  /// producing a false green.
+  #[test]
+  fn ut_cursor_untracked_warns_once_then_degrades_to_debug() {
+    ensure_capture_logger();
+    // Re-arm the latch: device UTs share one process, so the first-warn slot
+    // must be owned by THIS test regardless of execution order.
+    UNTRACKED_CURSOR_WARNED.store(false, Ordering::Relaxed);
+    let app = OpenHarmonyApp::new();
+    CAPTURED_LOGS
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .clear();
+
+    // First read: NotSupported + exactly one WARN record.
+    let first = cursor_position_from_app(&app);
+    assert!(
+      matches!(first, Err(error::ExternalError::NotSupported(_))),
+      "an unfed cursor must map CursorUntracked onto NotSupported (got {first:?}) — if this reads Ok, another test fed the cursor statics and this UT lost its precondition"
+    );
+    assert_eq!(
+      count_untracked_records(log::Level::Warn),
+      1,
+      "the first untracked read must log exactly one WARN record (T28-10)"
+    );
+    assert_eq!(
+      count_untracked_records(log::Level::Debug),
+      0,
+      "the first untracked read must not log at DEBUG"
+    );
+
+    // Second read: the same NotSupported error, but the record degrades to
+    // DEBUG.
+    let second = cursor_position_from_app(&app);
+    assert!(
+      matches!(second, Err(error::ExternalError::NotSupported(_))),
+      "the latch must not change the mapped error"
+    );
+    assert_eq!(
+      count_untracked_records(log::Level::Warn),
+      1,
+      "follow-up untracked reads must not warn again"
+    );
+    assert_eq!(
+      count_untracked_records(log::Level::Debug),
+      1,
+      "follow-up untracked reads must degrade to DEBUG (hilog flood guard)"
+    );
+    // Steady state: the latch stays tripped (the production steady state
+    // after any untracked read).
   }
 }
