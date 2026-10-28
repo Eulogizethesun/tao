@@ -901,6 +901,13 @@ impl Window {
   ///
   /// - **Android:** Unsupported.
   /// - **iOS:** Can only be called on the main thread.
+  /// - **OpenHarmony:** split by window kind (issue Eulogizethesun/tauri#237).
+  ///   On the main (UIAbility) window hiding is not supported (no
+  ///   window-level hide API): `set_visible(false)` logs and leaves the
+  ///   window untouched — the tauri layer surfaces an `ohos_unsupported`
+  ///   error for it. On sub-windows `set_visible(false)` hides the window
+  ///   (the d.ts `minimize()` dual semantics; `showWindow()` restores it)
+  ///   and `set_visible(true)` shows/restores it.
   #[inline]
   pub fn set_visible(&self, visible: bool) {
     self.window.set_visible(visible)
@@ -977,6 +984,13 @@ impl Window {
   ///   resizable to false after it. You might need a mechanism to check the window is really
   ///   maximized.
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** on UIAbility windows (the main window and spawned
+  ///   instances) only the local resizable cache and the edge-drag switch
+  ///   are touched — the title-bar decoration-bit dispatch is skipped (the
+  ///   ArkTS handler rejects it for UIAbility windows) and the drag switch
+  ///   routes by window id (main window `setResizeByDragEnabled`, API 14+;
+  ///   every other window `enableDrag`, API 20+). Sub-windows additionally
+  ///   dispatch the decoration bit.
   #[inline]
   pub fn set_resizable(&self, resizable: bool) {
     self.window.set_resizable(resizable)
@@ -987,6 +1001,9 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) —
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_minimizable(&self, minimizable: bool) {
     self.window.set_minimizable(minimizable)
@@ -998,6 +1015,9 @@ impl Window {
   ///
   /// - **macOS:** Disables the "zoom" button in the window titlebar, which is also used to enter fullscreen mode.
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) —
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_maximizable(&self, maximizable: bool) {
     self.window.set_maximizable(maximizable)
@@ -1010,6 +1030,9 @@ impl Window {
   /// - **Linux:** "GTK+ will do its best to convince the window manager not to show a close button.
   ///   Depending on the system, this function may not have any effect when called on a window that is already visible"
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) —
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_closable(&self, closable: bool) {
     self.window.set_closable(closable)
@@ -1050,6 +1073,10 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local mirror. On a sub-window a
+  ///   `set_visible(false)` hide intent also reports minimized (the d.ts
+  ///   `minimize()` dual semantics — the show path's restore leg reads this
+  ///   bit) until the next show or window-status backfill.
   #[inline]
   pub fn is_minimized(&self) -> bool {
     self.window.is_minimized()
@@ -1060,6 +1087,9 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local mirror. A refused main-window hide
+  ///   keeps reporting visible (the window was left untouched); a sub-window
+  ///   hide flips it off until the next show or window-status event.
   #[inline]
   pub fn is_visible(&self) -> bool {
     self.window.is_visible()
@@ -1070,6 +1100,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local resizable cache on every window kind
+  ///   (the edge-drag switch itself is not queryable).
   #[inline]
   pub fn is_resizable(&self) -> bool {
     self.window.is_resizable()
@@ -1080,6 +1112,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_minimizable(&self) -> bool {
     self.window.is_minimizable()
@@ -1090,6 +1124,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_maximizable(&self) -> bool {
     self.window.is_maximizable()
@@ -1100,6 +1136,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_closable(&self) -> bool {
     self.window.is_closable()
