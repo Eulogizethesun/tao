@@ -1439,12 +1439,18 @@ impl Window {
   /// `getWindowProperties()` snapshot — the same algorithm as `resize-inner`
   /// (`chrome = windowRect − drawableRect` per axis). Non-zero slots only (0
   /// = no limit stays 0); sub-windows are decorEnabled:false so their
-  /// chrome is 0 by construction; when the main-window snapshot is unreadable
-  /// (e.g. the builder-time dispatch racing content load) the ArkTS side
+  /// chrome is 0 by construction; when a UIAbility-kind window's snapshot
+  /// (the id-0 main window's) is unreadable (e.g. the builder-time dispatch
+  /// racing content load) the ArkTS side
   /// degrades to uncompensated inner-sized limits with a WARN instead of
   /// failing — limits are boundaries, not targets. A decor change after
   /// dispatch is the caller's business; re-dispatching on decor changes
   /// remains an open follow-up.
+  /// A spawned UIAbility instance (windowId > 0) instead takes set-limits'
+  /// silent chrome-0 arm on the drawable-degenerate path -- the same
+  /// uncompensated degrade, and that arm raises no WARN (the WARN-degrade
+  /// arm is main-window-only; the two rect-validation throws above it are
+  /// caught by the handler's catch block, whose WARN fires for any window).
   fn apply_window_limits(&self, window_id: i64) {
     let min_w = self.min_inner_width.load(Ordering::Acquire) as i64;
     let min_h = self.min_inner_height.load(Ordering::Acquire) as i64;
@@ -1697,10 +1703,12 @@ impl Window {
   }
 
   pub fn set_visible(&self, visibility: bool) {
-    // window_id 0 (main window) is valid for restore/show/move/resize/maximize
-    // (unlike set_focus/set_focusable, where the main window is OS-managed and
-    // guarded with `window_id > 0`), so no guard here — programmatic
-    // show/restore on the main window works (verified on device).
+    // window_id 0 (main window) is valid for restore/show/move/resize/maximize,
+    // so no `window_id > 0` guard here -- and none in the sibling focus
+    // methods either: set_focusable's id gate was removed in #174 (the main
+    // window, id 0, dispatches through the same bridge path) and set_focus's
+    // Option match dispatches id 0 too. The main window's programmatic
+    // show/restore goes through that same path (verified on device).
     let Some(window_id) = self.window_id else {
       return;
     };
@@ -1905,8 +1913,9 @@ impl Window {
   // UIAbility-kind window errors out for them (issue Eulogizethesun/tauri#238
   // — the buttons are OS-managed). set_resizable is the exception since issue
   // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
-  // main-window surface in set_resize_by_drag). is_resizable etc. read from
-  // the local mirror for sub-windows; UIAbility-kind button queries report
+  // UIAbility-kind surface in set_resize_by_drag (main id-0 and spawned
+  // instances alike). is_resizable etc. read from the local mirror for
+  // sub-windows; UIAbility-kind button queries report
   // the OS-managed truth (#238). See doc/OHOS窗口遗留问题.md in the tauri repo (issue 4).
   pub fn set_resizable(&self, resizable: bool) {
     if self.is_ui_ability_window() {
@@ -3187,11 +3196,11 @@ mod tests {
     let plan = creation_attr_plan(&attrs, true);
     assert_eq!(
       plan.decoration_flags, None,
-      "main-window button seeds must not dispatch decoration flags (OS-managed buttons)"
+      "UIAbility-kind windows (main id-0 and spawned): button seeds must not dispatch decoration flags (OS-managed buttons)"
     );
     assert_eq!(
       plan.mirror_flags, FLAG_ALL_DECORATIONS,
-      "main-window button bits stay cached at the all-ones default"
+      "UIAbility-kind windows (main id-0 and spawned): button bits stay cached at the all-ones default"
     );
     assert!(
       plan.resize_by_drag.is_none(),
@@ -3204,24 +3213,24 @@ mod tests {
     let plan = creation_attr_plan(&attrs, true);
     assert_eq!(
       plan.decoration_flags, None,
-      "main-window resizable(false) must NOT dispatch decoration flags (guaranteed ArkTS throw)"
+      "UIAbility-kind windows (main id-0 and spawned): resizable(false) must NOT dispatch decoration flags (guaranteed ArkTS throw)"
     );
     assert_eq!(
       plan.mirror_flags,
       FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE,
-      "main-window resizable(false) must still cache only the resizable bit clear (set_inner_size gate)"
+      "UIAbility-kind windows (main id-0 and spawned): resizable(false) must still cache only the resizable bit clear (set_inner_size gate)"
     );
     assert_eq!(
       plan.resize_by_drag,
       Some(false),
-      "main-window resizable(false) must seed the set_resize_by_drag(false) leg (#104)"
+      "UIAbility-kind windows (main id-0 and spawned): resizable(false) must seed the set_resize_by_drag(false) leg (#104)"
     );
 
     let attrs = window::WindowAttributes::default();
     let plan = creation_attr_plan(&attrs, true);
     assert!(
       plan.resize_by_drag.is_none(),
-      "main-window resizable(true) must not seed set_resize_by_drag"
+      "UIAbility-kind windows (main id-0 and spawned): resizable(true) must not seed set_resize_by_drag"
     );
 
     let mut attrs = window::WindowAttributes::default();
