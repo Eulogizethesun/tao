@@ -2628,11 +2628,15 @@ mod cursor_untracked_tests {
   // Cargo.toml's `rust-version = "1.74"`: 1.74 is the MSRV of consumers
   // building for standard (non-ohos) targets, and ohos-gated code - this
   // module tree is `#[cfg(target_env = "ohos")]` - is compiled out of
-  // their build surface entirely. The ohos target is pinned to the OHOS
-  // toolchain (>= 1.80) for test and non-test code alike; non-test ohos
-  // code already relies on LazyLock (WINDOW_MIRRORS and PENDING_WINDOW_OPS
-  // in window.rs, LAST_DISPATCHED_RECTS above). This test-only static adds
-  // no requirement beyond that existing pin.
+  // their build surface entirely. The ohos target - test and non-test code
+  // alike - is built with the OHOS toolchain, and non-test ohos code already
+  // relies on LazyLock (WINDOW_MIRRORS and PENDING_WINDOW_OPS in window.rs,
+  // LAST_DISPATCHED_RECTS above), so that toolchain's version must already
+  // be >= 1.80. That floor is a derived fact, not a mechanism: the repo
+  // carries no toolchain pin artifact (no rust-toolchain.toml, no .cargo
+  // config pin), so it is inferred from the existing LazyLock use sites
+  // rather than enforced by any file. This test-only static adds no new
+  // requirement beyond that derived floor.
   static CAPTURED_LOGS: std::sync::LazyLock<std::sync::Mutex<Vec<(log::Level, String)>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
