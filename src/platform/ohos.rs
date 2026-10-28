@@ -118,7 +118,7 @@ pub trait WindowBuilderExtOpenHarmony {
   ///   subsequent windows may opt in explicitly and take the
   ///   spawned-instance path.
   /// - `SubWindow`: Sub-window created via `windowStage.createSubWindow`, living
-  ///   inside the existing UIAbility container — not the OS-wide floating window
+  ///   inside the existing UIAbility container -- not the OS-wide floating window
   ///   type (`WindowType.TYPE_FLOAT`), a conflation the former `Float` variant
   ///   name wrongly suggested (issue Eulogizethesun/tauri#240).
   ///

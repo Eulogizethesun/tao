@@ -46,17 +46,17 @@ const EFFECTIVE_THEME_DARK: u8 = 1;
 const EFFECTIVE_THEME_UNSEEDED: u8 = 2;
 static LAST_EFFECTIVE_THEME: AtomicU8 = AtomicU8::new(EFFECTIVE_THEME_UNSEEDED);
 
-/// #180(a) (design D7): the window id currently recorded as focused — the
+/// #180(a) (design D7): the window id currently recorded as focused -- the
 /// shared change-edge snapshot for BOTH focus sources (SubWindowPage
 /// `windowEvent` WINDOW_ACTIVE/WINDOW_INACTIVE edges drained via
 /// `drain_pending_window_focus`, and the per-UIAbility stage
 /// GainedFocus/LostFocus arms). 0 = none. The edge rules built on it:
-/// a gain edge (focused=true, last≠W) pairs-clears the previous holder
+/// a gain edge (focused=true, last!=W) pairs-clears the previous holder
 /// before the gain; a loss edge only applies when W is the recorded holder;
 /// same-state duplicate edges are swallowed (zero WindowEvents). Written by
-/// `handle_gained_focus` (gain → window id) and the stage LostFocus arm
-/// (loss → 0) so cross-path duplicate edges dedup the same way. Read and
-/// written from the single-threaded run_loop dispatch only — Relaxed matches
+/// `handle_gained_focus` (gain -> window id) and the stage LostFocus arm
+/// (loss -> 0) so cross-path duplicate edges dedup the same way. Read and
+/// written from the single-threaded run_loop dispatch only -- Relaxed matches
 /// the HAS_FOCUS discipline.
 static LAST_FOCUSED_WINDOW_ID: AtomicI64 = AtomicI64::new(0);
 
@@ -65,11 +65,11 @@ static LAST_FOCUSED_WINDOW_ID: AtomicI64 = AtomicI64::new(0);
 /// comparison). Bitwise-equal repeats are swallowed; the first event forwards
 /// (0-bits is not a representable scale, so the initial value reads as
 /// unseeded). Mirrors the ThemeChanged edge detection
-/// ([`LAST_EFFECTIVE_THEME`]) — the two guards are independent and must not
+/// ([`LAST_EFFECTIVE_THEME`]) -- the two guards are independent and must not
 /// interact.
 static LAST_EFFECTIVE_SCALE: AtomicU64 = AtomicU64::new(0);
 
-/// #180 (design D8): the ThemeChanged-style edge detector for scale factors —
+/// #180 (design D8): the ThemeChanged-style edge detector for scale factors --
 /// returns `true` when the event must forward (first event or a real bitwise
 /// change) and updates the snapshot; `false` swallows the repeat. Extracted
 /// so the UT can drive the exact production guard.
@@ -116,10 +116,10 @@ pub(crate) fn effective_theme(app: &OpenHarmonyApp) -> Theme {
 
 /// Last known cursor position lives in the process-level cursor statics inside
 /// openharmony-ability (screen-global vp, fed by the ArkTS `onMouse` handlers
-/// of MainPage AND SubWindowPage via the `update_cursor_position` NAPI function —
+/// of MainPage AND SubWindowPage via the `update_cursor_position` NAPI function --
 /// ohos-cursor-passthrough D1/D2) and is read back through
 /// `OpenHarmonyApp::cursor_position()` (physical px). Never-fed reads fail
-/// with the typed untracked error → `ExternalError::NotSupported` (D3/R5);
+/// with the typed untracked error -> `ExternalError::NotSupported` (D3/R5);
 /// the NDK XComponent mouse path never fires while the cursor is over the
 /// WebView (which covers the window), so it cannot be the tracking source.
 
@@ -297,25 +297,25 @@ fn emit_synthetic_key<T: 'static>(
 
 /// Shared cursor-position read (physical px), used by both
 /// `EventLoopWindowTarget::cursor_position` and `Window::cursor_position`.
-/// Fed by the ArkTS `onMouse` handlers (MainPage AND SubWindowPage —
+/// Fed by the ArkTS `onMouse` handlers (MainPage AND SubWindowPage --
 /// ohos-cursor-passthrough D2) via the `update_cursor_position` NAPI
-/// function; the vp→physical conversion and the bit-unpacking of the process
+/// function; the vp->physical conversion and the bit-unpacking of the process
 /// statics live inside `OpenHarmonyApp::cursor_position` (issue #87 major-10)
-/// — see the CURSOR_POSITION note near the top of this file.
+/// -- see the CURSOR_POSITION note near the top of this file.
 ///
-/// Untracked fail-safe contract (ohos-cursor-passthrough D3, R5 — behavior
+/// Untracked fail-safe contract (ohos-cursor-passthrough D3, R5 -- behavior
 /// change): when no feed was ever recorded the read is the typed
 /// `CursorUntracked` error, mapped here onto `ExternalError::NotSupported`
-/// (the §1.5 error-conversion constraint: single variant, no wrapping) —
+/// (the section 1.5 error-conversion constraint: single variant, no wrapping) --
 /// NOT swallowed into `Ok((0,0))`, which was indistinguishable from a real
 /// screen-origin feed. runtime-wry maps `NotSupported` to
 /// `FailedToGetCursorPosition`, so the tauri command and the JS
-/// `cursorPosition()` promise reject; app-side discipline (spec): catch →
+/// `cursorPosition()` promise reject; app-side discipline (spec): catch ->
 /// keep `set_ignore_cursor_events(true)`, only a hit-test match may set
 /// touchable.
 /// PR#28 review T28-10 (gate F11): process-global warn-once latch for the
 /// untracked-cursor fail-safe below. Hoisted from a fn-local static to module
-/// scope so the F11 UT can re-arm it — device UTs share one process and
+/// scope so the F11 UT can re-arm it -- device UTs share one process and
 /// #[test]s run in parallel. In production the latch only "clears" by the
 /// first feed arriving (after which the read succeeds and this branch never
 /// fires again), so a single latch is sufficient; a UT reset merely re-opens
@@ -330,7 +330,7 @@ pub(crate) fn cursor_position_from_app(
     .map(|(x, y)| PhysicalPosition::new(x, y))
     .map_err(|CursorUntracked| {
       // PR#28 review T28-10: a polling caller hits this branch on every read
-      // while no mouse feed has ever arrived — warn once, then drop to debug,
+      // while no mouse feed has ever arrived -- warn once, then drop to debug,
       // so the hilog cannot be flooded. See UNTRACKED_CURSOR_WARNED (gate F11
       // hoisted the state to module scope for UT re-armability).
       if !UNTRACKED_CURSOR_WARNED.swap(true, Ordering::Relaxed) {
@@ -800,7 +800,7 @@ impl<T: 'static> EventLoop<T> {
   ) {
     HAS_FOCUS.store(true, Ordering::Relaxed);
     // #173: mirror the per-window focused bit through WINDOW_MIRRORS (miss
-    // tolerated — the window may have dropped between event and write).
+    // tolerated -- the window may have dropped between event and write).
     super::window::set_mirror_focused(window_id, true);
     // #180(a) (design D7): sync the shared change-edge snapshot so the sub-window
     // drain path and this stage path dedup duplicate edges against the same
@@ -868,18 +868,18 @@ impl<T: 'static> EventLoop<T> {
     );
   }
 
-  /// #180(a) (design D7): the single blur write face — per-window mirror bit
+  /// #180(a) (design D7): the single blur write face -- per-window mirror bit
   /// (#173 write face) + the `Focused(false)` event. Shared by the stage
   /// LostFocus arm (which additionally clears the app-level HAS_FOCUS bit)
   /// and the sub-window drain's paired-blur synthesis (which must NOT touch
-  /// HAS_FOCUS — the ability may still hold focus, and the pair is completed
+  /// HAS_FOCUS -- the ability may still hold focus, and the pair is completed
   /// by the immediately following gain on the new window). Extracted so the
   /// two callers cannot drift.
   fn apply_blur(
     event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
     window_id: i64,
   ) {
-    // #173: mirror the per-window focused bit (miss tolerated — same
+    // #173: mirror the per-window focused bit (miss tolerated -- same
     // unregister-vs-backfill timing as the other mirror bits).
     super::window::set_mirror_focused(window_id, false);
     call_event_handler!(
@@ -895,16 +895,16 @@ impl<T: 'static> EventLoop<T> {
   /// (SubWindowPage windowEvent WINDOW_ACTIVE/WINDOW_INACTIVE) with change-edge
   /// dedup against [`LAST_FOCUSED_WINDOW_ID`] plus paired-blur synthesis:
   ///
-  /// - gain edge (`focused=true`, last≠W): first pair-clear the previous
-  ///   holder P=last (mirror bit + `Focused(false)`) — ONLY when P still
+  /// - gain edge (`focused=true`, last!=W): first pair-clear the previous
+  ///   holder P=last (mirror bit + `Focused(false)`) -- ONLY when P still
   ///   reports `focused=true` (a holder already blurred by a real stage event
-  ///   must not be double-blurred) — then the regular gain path
+  ///   must not be double-blurred) -- then the regular gain path
   ///   ([`Self::handle_gained_focus`], which also syncs the snapshot).
   /// - loss edge (`focused=false`, last==W): the blur write face + snapshot
-  ///   → 0. HAS_FOCUS is deliberately NOT touched (see [`Self::apply_blur`]
+  ///   -> 0. HAS_FOCUS is deliberately NOT touched (see [`Self::apply_blur`]
   ///   note): only stage events maintain the app-level bit.
   /// - same-state edges (`focused=true` && last==W; `focused=false` &&
-  ///   last≠W): swallowed — zero WindowEvents, zero mirror writes.
+  ///   last!=W): swallowed -- zero WindowEvents, zero mirror writes.
   fn handle_pending_window_focus(
     event_loop_cell: &Arc<RefCell<Option<Box<dyn FnMut(event::Event<T>) + 'static>>>>,
     window_id: i64,
@@ -914,7 +914,7 @@ impl<T: 'static> EventLoop<T> {
     if focused {
       if last == window_id {
         // Duplicate gain edge (e.g. ArkTS re-reporting WINDOW_ACTIVE for the
-        // window it already recorded as focused) — swallow.
+        // window it already recorded as focused) -- swallow.
         return;
       }
       // Pair semantics: the previous holder must not keep a stale focused bit
@@ -928,7 +928,7 @@ impl<T: 'static> EventLoop<T> {
     } else {
       if last != window_id {
         // Stale/unknown blur edge: the recorded holder is someone else (or
-        // nothing) — swallow so a replayed INACTIVE cannot blur a window
+        // nothing) -- swallow so a replayed INACTIVE cannot blur a window
         // that legitimately holds focus now.
         return;
       }
@@ -1055,7 +1055,7 @@ impl<T: 'static> EventLoop<T> {
       }
 
       // #180(a) (design D7): sub-window focus edges (SubWindowPage windowEvent
-      // WINDOW_ACTIVE/WINDOW_INACTIVE → notifyWindowFocus) drain next to the
+      // WINDOW_ACTIVE/WINDOW_INACTIVE -> notifyWindowFocus) drain next to the
       // status backfill and run through the same change-edge dedup +
       // paired-blur synthesis the stage arms share.
       for (focus_window_id, focused) in openharmony_ability::drain_pending_window_focus() {
@@ -1284,7 +1284,7 @@ impl<T: 'static> EventLoop<T> {
           // first readable windowRectChange, so fall back to the app-level
           // content rect then (the same pre-geometry degradation the Resized
           // path tolerates).
-          // #180 (design D8): the broadcast is edge-guarded — a bitwise-equal
+          // #180 (design D8): the broadcast is edge-guarded -- a bitwise-equal
           // scale repeat (ConfigChanged storms that leave scale untouched)
           // forwards nothing, first event forwards (0-bits reads as
           // unseeded). Mirrors the ThemeChanged guard below; the two edge
@@ -2005,7 +2005,7 @@ mod input_tests {
     // gained-focus test: reset before (no assumed initial state) and after
     // (this test leaves SHIFT held) so neither test flakes the other. The
     // shared WINDOW_MIRRORS_TEST_LOCK serializes those resets against the
-    // other readers/writers of the static (PR review fix: device-UT flake —
+    // other readers/writers of the static (PR review fix: device-UT flake --
     // an unlocked empty-reset landing between the gained-focus test's
     // CONTROL seed and its read suppressed the expected ModifiersChanged).
     let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
@@ -2060,8 +2060,8 @@ mod input_tests {
     // test's residue. The WINDOW_MIRRORS_TEST_LOCK additionally serializes
     // this test's GLOBAL writes (handle_gained_focus stores HAS_FOCUS /
     // LAST_FOCUSED_WINDOW_ID / WINDOW_MIRRORS and clears
-    // KEYBOARD_MODIFIERS) against the focus_scale_tests family — which hold
-    // the same lock — and against the axis tests that assert ctrl=false off
+    // KEYBOARD_MODIFIERS) against the focus_scale_tests family -- which hold
+    // the same lock -- and against the axis tests that assert ctrl=false off
     // the process-level modifier static (PR review fix: device-UT flake,
     // ~1-2 parallel runs in 10 observed a cross-test residue).
     let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
@@ -2246,7 +2246,7 @@ mod live_window_ids_tests {
     {
       // Keyed removal, not a whole-registry clear: window.rs's mirror test
       // registers its own sentinel entry in WINDOW_MIRRORS, and these tests
-      // run in parallel — only this test's own keys may be touched.
+      // run in parallel -- only this test's own keys may be touched.
       let mut mirrors = WINDOW_MIRRORS.lock().expect("WINDOW_MIRRORS poisoned");
       mirrors.remove(&LIVE);
       mirrors.remove(&DEAD);
@@ -2260,7 +2260,7 @@ mod live_window_ids_tests {
     drop(live_state);
     assert_eq!(live_window_ids(), vec![0]);
     // Empty registry (pre-first-window phase): same fallback. Keyed removal
-    // again — foreign sentinel entries (window.rs mirror test) stay put.
+    // again -- foreign sentinel entries (window.rs mirror test) stay put.
     WINDOW_MIRRORS
       .lock()
       .expect("WINDOW_MIRRORS poisoned")
@@ -2326,7 +2326,7 @@ mod focus_scale_tests {
 
   /// UT for #180(a) step 1 (design D7): a first sub-window gain edge forwards
   /// Focused(true); a gain edge over a still-focused previous holder
-  /// pair-clears it first (mirror bit + synthesized Focused(false)) — the
+  /// pair-clears it first (mirror bit + synthesized Focused(false)) -- the
   /// paired semantics that keep ArkTS fast-switches (ACTIVE without a
   /// matching INACTIVE) from leaving a stale focused bit.
   #[test]
@@ -2381,7 +2381,7 @@ mod focus_scale_tests {
   }
 
   /// UT for #180(a) step 2 (design D7): a same-window same-state gain edge is
-  /// swallowed — zero WindowEvents, zero mirror writes, snapshot unchanged.
+  /// swallowed -- zero WindowEvents, zero mirror writes, snapshot unchanged.
   #[test]
   fn ut_focus_drain_duplicate_gain_edge_is_swallowed() {
     let _guard = WINDOW_MIRRORS_TEST_LOCK
@@ -2418,7 +2418,7 @@ mod focus_scale_tests {
   }
 
   /// UT for #180(a) (design D7 loss edge): a loss edge applies only when the
-  /// window is the recorded holder (blur write face + snapshot → 0); a
+  /// window is the recorded holder (blur write face + snapshot -> 0); a
   /// repeat loss edge for a window that is no longer the holder is
   /// swallowed. HAS_FOCUS stays untouched by the drain path (stage events
   /// own the app-level bit).
@@ -2450,7 +2450,7 @@ mod focus_scale_tests {
       "swallowed blur must not clear the snapshot"
     );
 
-    // Holder blur: the blur write face + snapshot → 0; HAS_FOCUS untouched.
+    // Holder blur: the blur write face + snapshot -> 0; HAS_FOCUS untouched.
     let events = run_collected::<()>(|cell| {
       EventLoop::<()>::handle_pending_window_focus(cell, W, false);
     });
@@ -2491,7 +2491,7 @@ mod focus_scale_tests {
   }
 
   /// UT for #180(a) step 3 (design D7): the stage path and the sub-window drain share
-  /// LAST_FOCUSED_WINDOW_ID — a stage gain (handle_gained_focus) syncs the
+  /// LAST_FOCUSED_WINDOW_ID -- a stage gain (handle_gained_focus) syncs the
   /// snapshot the drain dedups against, so a cross-path duplicate gain edge
   /// for the same window is swallowed, while a sub-window gain over the
   /// stage-focused window still pair-clears it.
@@ -2563,7 +2563,7 @@ mod focus_scale_tests {
   }
 
   /// UT for #180 (design D8): the same scale value forwarded repeatedly
-  /// forwards exactly once — the first event seeds/forwards, bitwise-equal
+  /// forwards exactly once -- the first event seeds/forwards, bitwise-equal
   /// repeats are swallowed, and a real change forwards again. Also asserts
   /// the ThemeChanged guard's independence: deduping scale never touches
   /// LAST_EFFECTIVE_THEME and vice versa.
@@ -2575,7 +2575,7 @@ mod focus_scale_tests {
     // First event (unseeded 0-bits) forwards.
     assert!(scale_should_forward(1.5), "first scale event must forward");
     // Three repeats of the same value: one repeat would be the "same value 3
-    // sends" — all three are swallowed (the single forward above is the one).
+    // sends" -- all three are swallowed (the single forward above is the one).
     assert!(!scale_should_forward(1.5), "repeat #1 must be swallowed");
     assert!(!scale_should_forward(1.5), "repeat #2 must be swallowed");
     assert!(!scale_should_forward(1.5), "repeat #3 must be swallowed");
@@ -2586,7 +2586,7 @@ mod focus_scale_tests {
       "repeat after the change must be swallowed"
     );
     // A different value whose f64 bits differ forwards. NOTE: `2.0 +
-    // f64::EPSILON` is NOT a bitwise change — EPSILON (2^-52) is half the ULP
+    // f64::EPSILON` is NOT a bitwise change -- EPSILON (2^-52) is half the ULP
     // at 2.0 (ULP = 2^-51 there), so the sum rounds back to exactly 2.0. Step
     // one bit instead.
     assert!(
@@ -2608,7 +2608,7 @@ mod focus_scale_tests {
 
 /// PR#28 review gate F11: the T28-10 cursor warn-once latch had zero UT. A
 /// capturing logger is required because the ONLY observable difference
-/// between the first untracked read and the follow-ups is the log level —
+/// between the first untracked read and the follow-ups is the log level --
 /// the mapped error is the same NotSupported every time. The logger is
 /// installed once per process (log::set_boxed_logger is one-shot) and
 /// records (level, message) pairs; other #[test]s may log concurrently, so
@@ -2685,7 +2685,7 @@ mod cursor_untracked_tests {
   /// process logs at WARN, every later one degrades to DEBUG (hilog flood
   /// guard); the mapped error is NotSupported in both legs. Precondition:
   /// the process cursor statics (openharmony-ability EVER_FED) must still be
-  /// unfed — no other tao UT feeds the cursor, so the pristine state holds;
+  /// unfed -- no other tao UT feeds the cursor, so the pristine state holds;
   /// a feed from a future UT would fail the first assert below instead of
   /// producing a false green.
   #[test]

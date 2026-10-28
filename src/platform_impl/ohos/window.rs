@@ -50,7 +50,7 @@ impl From<u64> for WindowId {
 
 /// OHOS window kind: determines whether this window lives in a UIAbility
 /// container (UIAbility) or is a sub-window of an existing UIAbility
-/// container (SubWindow) — created via `windowStage.createSubWindow` and
+/// container (SubWindow) -- created via `windowStage.createSubWindow` and
 /// destroyed with its host UIAbility (issue Eulogizethesun/tauri#240: named
 /// for the OS concept; "Float" conflated this with the OS-wide floating
 /// window type TYPE_FLOAT, which this kind does not use).
@@ -67,12 +67,12 @@ pub enum OHOSWindowKind {
 }
 
 /// Latches once the first (UIAbility) window has been created. Only
-/// constraint it enforces: the first window must be a UIAbility — a
+/// constraint it enforces: the first window must be a UIAbility -- a
 /// SubWindow window has no container to attach to. Replaces the old
 /// `UIABILITY_CREATED` singleton guard (design D2).
 ///
 /// Process-lifetime bootstrap marker (committer Eulogizethesun/tauri#169):
-/// it is deliberately NOT reset on window `Drop` — `Drop` only unregisters
+/// it is deliberately NOT reset on window `Drop` -- `Drop` only unregisters
 /// the per-window state mirror, so the latch keeps recording "a UIAbility
 /// container exists in this process". Later windows therefore default to
 /// `OHOSWindowKind::SubWindow`, while an explicit UIAbility request stays
@@ -111,7 +111,7 @@ pub(crate) struct WindowStateMirror {
   /// Per-window focused bit (#173): written by the event-loop focus arms
   /// (GainedFocus / LostFocus) through [`set_mirror_focused`] so the mirror
   /// records per-window system truth. Intentionally NOT read by
-  /// `Window::is_focused()` — that stays on the app-level HAS_FOCUS static
+  /// `Window::is_focused()` -- that stays on the app-level HAS_FOCUS static
   /// (changing the read source was explicitly out of scope for #173).
   pub(crate) focused: AtomicBool,
 }
@@ -192,7 +192,7 @@ pub(crate) static WINDOW_MIRRORS: std::sync::LazyLock<
 #[cfg(test)]
 pub(crate) static WINDOW_MIRRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // The lock serializes every test that touches the process-global input/focus
-// statics — WINDOW_MIRRORS + HAS_FOCUS/LAST_FOCUSED (focus_scale_tests,
+// statics -- WINDOW_MIRRORS + HAS_FOCUS/LAST_FOCUSED (focus_scale_tests,
 // live_window_ids_tests, window.rs mirror test) and KEYBOARD_MODIFIERS (the
 // axis tests' ctrl= assertions vs the gained-focus CONTROL write). One shared
 // domain, because the same handler writes several of these statics per call
@@ -200,7 +200,7 @@ pub(crate) static WINDOW_MIRRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mu
 
 /// Writes the per-window focused bit (#173) through [`WINDOW_MIRRORS`].
 /// A miss (unknown id, or the mirror already unregistered because the
-/// `Window` was dropped) is silently skipped — same tolerance as the
+/// `Window` was dropped) is silently skipped -- same tolerance as the
 /// unregister-vs-backfill timing of the other mirror bits. Called by the
 /// event-loop focus arms right after the app-level HAS_FOCUS store.
 pub(crate) fn set_mirror_focused(window_id: i64, focused: bool) {
@@ -215,7 +215,7 @@ pub(crate) fn set_mirror_focused(window_id: i64, focused: bool) {
 }
 
 /// #180(a) (design D7): reads the per-window focused bit through
-/// [`WINDOW_MIRRORS`] — the drain's paired-blur synthesis gates on it
+/// [`WINDOW_MIRRORS`] -- the drain's paired-blur synthesis gates on it
 /// ("P 仍标记 focused=true" per the focus-state spec) so a holder whose bit
 /// was already cleared by a real stage blur is not double-blurred. An unknown
 /// or dropped mirror reads `false` (nothing to pair-clear).
@@ -233,8 +233,8 @@ pub(crate) fn mirror_focused_bit(window_id: i64) -> bool {
 /// client is re-fetched once through `refetch` (the app handle's
 /// `WindowExt::window()`, a non-blocking RwLock read) and the cache is
 /// overwritten on success so later calls are served from it; a persistent
-/// failure returns `None` with a warn emitted exactly once — gated on the
-/// false→true transition of `warned` (swap-based debounce, so hot paths like
+/// failure returns `None` with a warn emitted exactly once -- gated on the
+/// false->true transition of `warned` (swap-based debounce, so hot paths like
 /// the decoration seed cannot storm the log when the bridge is down).
 ///
 /// Generic over the client type: a real `WindowClient` needs a live bridge
@@ -283,7 +283,7 @@ type PendingWindowOp = Box<dyn FnOnce() + Send + 'static>;
 /// UIAbility windows awaiting stage registration (issue 7), and the
 /// sub-windows awaiting the ArkTS creation chain to settle (issue-7 addendum; gated
 /// only when the ProcessInitializer capability handshake armed the Rust-side
-/// registry — a stale HAR keeps sub-window ops on the old fire-and-forget path).
+/// registry -- a stale HAR keeps sub-window ops on the old fire-and-forget path).
 /// Keyed by OHOS window id, FIFO per window. Drained by the event loop
 /// ([`drain_ready_pending_window_ops`]) whenever the D7 registration waker or
 /// the sub-window settle waker fires, or inline by [`Window::dispatch_or_queue`]
@@ -362,8 +362,8 @@ pub(crate) fn drop_pending_window_ops(window_id: i64) {
 
 /// #168 (design D1): the enqueue/dispatch body of [`Window::dispatch_or_queue`],
 /// extracted as a free function so the creation-attr seeding path and the UTs
-/// exercise the exact production mechanic: ready → run inline (no queue
-/// entry), not-ready → hold in [`PENDING_WINDOW_OPS`] until
+/// exercise the exact production mechanic: ready -> run inline (no queue
+/// entry), not-ready -> hold in [`PENDING_WINDOW_OPS`] until
 /// [`drain_ready_pending_window_ops`] replays it. A `Window` cannot be
 /// constructed outside a bridge session, so the UT drives this entry point
 /// directly with sentinel ids (same discipline as the O10-6 queue test).
@@ -374,14 +374,14 @@ pub(crate) fn dispatch_or_queue_op(window_id: i64, op: PendingWindowOp) {
   }
   // Push-then-check (wry pending_ops TOCTOU): if the handshake flipped
   // between the ready check above and this push, the settle waker already
-  // fired and no further wake is coming — drain this id now. The entry may
+  // fired and no further wake is coming -- drain this id now. The entry may
   // already hold earlier queued ops, so drain it FIFO, not just this op.
   let mut map = PENDING_WINDOW_OPS
     .lock()
     .unwrap_or_else(|poisoned| poisoned.into_inner());
-  // First push for this id (empty → non-empty) is the creation-latency
+  // First push for this id (empty -> non-empty) is the creation-latency
   // marker (O10-3): one warn per queue lifetime is expected while a
-  // spawned instance's handshake completes — a queue that is never
+  // spawned instance's handshake completes -- a queue that is never
   // replayed nor dropped is the anomaly. AMS outright rejection is
   // covered by the ability-side rollback (notify_ui_ability_start_failed,
   // ability#53 AF3); a silent wedge here means the start neither completed
@@ -413,7 +413,7 @@ pub(crate) fn dispatch_or_queue_op(window_id: i64, op: PendingWindowOp) {
 /// EXECUTION time instead of call time. The eager `bridge_client` resolution
 /// in the setters ran BEFORE the queue check, so a seed fired while the
 /// client was not yet resolvable (the #184 early-init state) returned early
-/// and nothing ever entered [`PENDING_WINDOW_OPS`] — the build()-tail
+/// and nothing ever entered [`PENDING_WINDOW_OPS`] -- the build()-tail
 /// creation seeds (always_on_top / fullscreen / maximized / focusable /
 /// decoration flags / size limits) were permanently lost, and the handshake
 /// drain had nothing to replay. The op body re-resolves through the captured
@@ -425,14 +425,14 @@ pub(crate) fn dispatch_or_queue_op(window_id: i64, op: PendingWindowOp) {
 /// Coverage boundary (PR#28 review T28-3): the hold covers exactly the
 /// windows whose creation handshake is pending (spawned UIAbility instances
 /// and sub-windows). The primary main window (id 0) is always ready, so its
-/// deferred ops execute INLINE at call time — the in-op re-resolve is a
+/// deferred ops execute INLINE at call time -- the in-op re-resolve is a
 /// same-instant second attempt, and a still-unresolvable client drops the
 /// seed with the structured warn. There is no handshake to await for id 0,
 /// so "creation seeds survive a not-yet-resolvable bridge client" holds for
 /// the pending-handshake populations, not for the primary window.
 ///
 /// Generic over the client type: a real `WindowClient` needs a live bridge
-/// session that a test binary does not have — the UT drives this entry point
+/// session that a test binary does not have -- the UT drives this entry point
 /// with a sentinel client (same discipline as
 /// [`bridge_client_cached_or_refetch`] / [`dispatch_or_queue_op`]).
 fn enqueue_deferred_window_op<C, F, Fut>(
@@ -462,7 +462,7 @@ pub(crate) struct Window {
   app: OpenHarmonyApp,
   window_id: Option<i64>,
   /// Resolved window kind (issue Eulogizethesun/tauri#238): UIAbility vs
-  /// SubWindow. LOCAL decision input only — consumed by the
+  /// SubWindow. LOCAL decision input only -- consumed by the
   /// UIAbility-kind decoration gates (the id-0 main window and spawned
   /// instances alike; three button setters error out, is_* queries
   /// report the OS-managed truth), the creation-attr seed policy
@@ -473,7 +473,7 @@ pub(crate) struct Window {
   /// the old kind field together with the `window_type` DOWNLINK dead chain
   /// (whose only consumer was populating `WindowCreateParams.window_type`, a
   /// field the create TSFN tuple never carried). #97's zero-consumers
-  /// rationale does not apply to the kind itself — it was always resolved in
+  /// rationale does not apply to the kind itself -- it was always resolved in
   /// `new()`, and #238 gives it real local consumers again. The
   /// `window_type` downlink (and the creation window-type enum that fed it) is
   /// deleted outright since #240.
@@ -487,7 +487,7 @@ pub(crate) struct Window {
   window_client: std::sync::Mutex<Option<openharmony_ability_plugin_window::WindowClient>>,
   /// Warn-once debounce for bridge-client re-fetch failures (#184): the lazy
   /// re-fetch runs on hot paths (e.g. the decoration seed), so the failure
-  /// warn is emitted only on the false→true transition of this flag.
+  /// warn is emitted only on the false->true transition of this flag.
   bridge_refetch_warned: AtomicBool,
   /// Background runtime handle for spawning async bridge calls.
   runtime: BridgeExecutor,
@@ -525,15 +525,15 @@ pub(crate) struct Window {
   /// SubWindowPage buttons.
   ///
   /// UIAbility-kind window contract (the bootstrap main window AND spawned
-  /// instances — doc corrected per PR#28 review T28-7): the bitfield IS
-  /// written locally — the creation seed caches the attr-derived
+  /// instances -- doc corrected per PR#28 review T28-7): the bitfield IS
+  /// written locally -- the creation seed caches the attr-derived
   /// `mirror_flags` (the resizable clear included) and the runtime
-  /// `set_resizable` writes the resizable bit — but it is never DISPATCHED
+  /// `set_resizable` writes the resizable bit -- but it is never DISPATCHED
   /// for these windows (the ArkTS setDecorationFlags handler throws, #238;
   /// the runtime setter skips the dispatch too, T28-2), and the three button
   /// bits are OS-managed (the button setters error out). The
   /// set_minimized/set_maximized guards read FLAG_MINIMIZABLE/FLAG_MAXIMIZABLE
-  /// and therefore always pass for UIAbility windows — consistent with the
+  /// and therefore always pass for UIAbility windows -- consistent with the
   /// OS-managed "always available" reading (disclosed, D7).
   /// is_minimizable/is_maximizable/is_closable read `kind` for UIAbility
   /// windows, not this field; is_resizable reads the cached resizable bit on
@@ -663,39 +663,39 @@ fn rgba_to_ohos_color(transparent: bool, bg: Option<window::RGBA>) -> Option<u32
 }
 
 /// #168 (design D1): the creation-time seed/replay plan derived from the
-/// builder attrs. Pure decision record — the dispatch rides the existing
+/// builder attrs. Pure decision record -- the dispatch rides the existing
 /// setter channel ([`Window::dispatch_or_queue`]), while the decision itself
 /// is UT-able without a bridge session (a `Window` cannot be constructed
 /// outside one).
 struct CreationAttrPlan {
-  /// Seed `set_always_on_top(true)` — default `false`, so only a builder
+  /// Seed `set_always_on_top(true)` -- default `false`, so only a builder
   /// `true` fires.
   always_on_top: bool,
-  /// Local mirror bitfield — stored into `Window::decoration_flags` whenever
+  /// Local mirror bitfield -- stored into `Window::decoration_flags` whenever
   /// it differs from the `FLAG_ALL_DECORATIONS` default (the `set_maximized`
   /// FLAG_MAXIMIZABLE guard and the `set_inner_size` FLAG_RESIZABLE gate read
   /// that cache). Recorded for BOTH window kinds, decoupled from the
   /// `set_window_decoration_flags` dispatch below.
   mirror_flags: u8,
   /// Seed `set_window_decoration_flags` with the attr-derived bitfield;
-  /// `None` = identical to the `FLAG_ALL_DECORATIONS` default → zero
+  /// `None` = identical to the `FLAG_ALL_DECORATIONS` default -> zero
   /// dispatch. Always `None` on a UIAbility-kind window (the bootstrap main
   /// window and spawned instances alike): the ArkTS setDecorationFlags
   /// handler throws for UIAbility-kind windows (the id-0 main window and
   /// spawned UIAbility instances; issue Eulogizethesun/tauri#238), so a
-  /// dispatch there is a guaranteed-fail warn — sub-windows only.
+  /// dispatch there is a guaranteed-fail warn -- sub-windows only.
   decoration_flags: Option<u8>,
   /// Resize seed (#238 design D7 + issue Eulogizethesun/tauri#104):
-  /// `Some(false)` when `attrs.resizable` is `false` — the resizable attr's
+  /// `Some(false)` when `attrs.resizable` is `false` -- the resizable attr's
   /// real surface (the edge-drag switch), the same leg the runtime
   /// `set_resizable` dispatches. `None` = zero dispatch.
   ///
   /// Branch landing (PR#28 review T28-5): the branch is decided by the ArkTS
-  /// `set-resize-by-drag` routing ALONE, which keys on `windowId === 0` —
+  /// `set-resize-by-drag` routing ALONE, which keys on `windowId === 0` --
   /// the primary window (id 0) lands on `setResizeByDragEnabled` while every
   /// other window (spawned UIAbility instances and sub-windows, id > 0)
   /// lands on the `enableDrag` branch. This plan never re-decides the branch
-  /// locally — the two ends agree by construction instead of by duplicated
+  /// locally -- the two ends agree by construction instead of by duplicated
   /// classification.
   ///
   /// PR#28 review gate F1: the seed is planned for EVERY window kind. A
@@ -703,9 +703,9 @@ struct CreationAttrPlan {
   /// mirroring the runtime `set_resizable` dual dispatch (before the fix a
   /// sub-window created resizable(false) never seeded `enableDrag`, so the
   /// edge-drag switch stayed at its OS default until a runtime
-  /// `set_resizable` call — creation and runtime diverged).
+  /// `set_resizable` call -- creation and runtime diverged).
   resize_by_drag: Option<bool>,
-  /// Replay `set_fullscreen` — upstream windows backend form
+  /// Replay `set_fullscreen` -- upstream windows backend form
   /// (windows/window.rs:1338-1339): fullscreen takes precedence over
   /// maximized (else-if).
   fullscreen: Option<Fullscreen>,
@@ -718,10 +718,10 @@ struct CreationAttrPlan {
   /// linux `accept_focus(focusable && focused)`), never as a `set_focus()`
   /// call. The attribute default is `focused: true`, and tauri's window
   /// config `focus` (default true, settable false) is forwarded by
-  /// runtime-wry into attributes — so both "never specified" and "explicitly
+  /// runtime-wry into attributes -- so both "never specified" and "explicitly
   /// true" hit the differ-from-default no-op, while `false` maps to
   /// `set_focusable(false)` (#174 made setFocusable effective on every
-  /// window) — the PERSISTENT `accept_focus(false)` semantic: gtk-aligned
+  /// window) -- the PERSISTENT `accept_focus(false)` semantic: gtk-aligned
   /// (the window stays unfocusable), deliberately diverging from Windows'
   /// create-unfocused-but-still-focusable. A presence-based `set_focus()`
   /// would fire on every window creation and violate the spec's
@@ -734,9 +734,9 @@ struct CreationAttrPlan {
 /// `WindowAttributes` plans zero dispatches (spec: default attributes
 /// produce no extra traffic).
 ///
-/// #238 (design D7): on a UIAbility-kind window (`is_ui_ability_window` —
+/// #238 (design D7): on a UIAbility-kind window (`is_ui_ability_window` --
 /// the bootstrap main window AND later spawned instances) nothing rides
-/// `set_window_decoration_flags` — the ArkTS handler throws for
+/// `set_window_decoration_flags` -- the ArkTS handler throws for
 /// UIAbility-kind windows (main and spawned alike). The buttons are
 /// OS-managed and the platform exposes no API for these enable/disable
 /// semantics; button visibility/style APIs exist, operation control does
@@ -746,14 +746,14 @@ struct CreationAttrPlan {
 /// that cache), and the one attr with a real surface is `resizable`:
 /// `false` seeds `set_resize_by_drag(false)` (issue
 /// Eulogizethesun/tauri#104), the same leg the runtime `set_resizable`
-/// dispatches — landing on `setResizeByDragEnabled` for window_id 0 and on
+/// dispatches -- landing on `setResizeByDragEnabled` for window_id 0 and on
 /// the `enableDrag` sub-window branch for spawned instances and sub-windows
 /// (PR#28 review T28-5, unified `windowId === 0` criterion; gate F1 extended
 /// the seed to sub-windows, so a sub-window created resizable(false) rides
-/// BOTH the decoration-flags leg and the drag leg — same shape as the
+/// BOTH the decoration-flags leg and the drag leg -- same shape as the
 /// runtime setter). Runtime setters on UIAbility-kind windows error
 /// out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
-/// always passes there — "always maximizable" is the disclosed consistent
+/// always passes there -- "always maximizable" is the disclosed consistent
 /// reading (D7).
 fn creation_attr_plan(
   attrs: &window::WindowAttributes,
@@ -778,7 +778,7 @@ fn creation_attr_plan(
     always_on_top: attrs.always_on_top,
     mirror_flags: flags,
     // #238: a UIAbility-kind window never dispatches decoration flags
-    // (guaranteed ArkTS throw) — its resizable attr rides `resize_by_drag`
+    // (guaranteed ArkTS throw) -- its resizable attr rides `resize_by_drag`
     // instead, and its button bits are OS-managed with no surface at all.
     decoration_flags: if !is_ui_ability_window && flags != FLAG_ALL_DECORATIONS {
       Some(flags)
@@ -1068,7 +1068,7 @@ impl Window {
     // Create the WindowClient bridge facade. If the bridge runtime is not yet
     // ready (e.g. during early init), the cache starts None: that is warned
     // about once here, and later window operations lazily re-fetch through
-    // the app handle (#184) — see `bridge_client`.
+    // the app handle (#184) -- see `bridge_client`.
     let window_client = match el.app.window() {
       Ok(client) => Some(client),
       Err(e) => {
@@ -1082,7 +1082,7 @@ impl Window {
     let runtime = el.bridge_executor.clone();
 
     // #173: seed the mirror's per-window focused bit from the app-level
-    // HAS_FOCUS snapshot at registration time — the focus arms only write on
+    // HAS_FOCUS snapshot at registration time -- the focus arms only write on
     // transitions, so without the seed the bit would stay false for a window
     // created while the app already had focus.
     let mirror = Arc::new(WindowStateMirror::new(HAS_FOCUS.load(Ordering::Relaxed)));
@@ -1138,7 +1138,7 @@ impl Window {
     // decorations(false) must not strip the primary window's decorations.
     if is_ui_ability_window && !window_attrs.decorations {
       // PR#28 review T28-3: this creation seed used the eager `cached_client`
-      // read and was silently lost when the bridge was not yet resolvable —
+      // read and was silently lost when the bridge was not yet resolvable --
       // the same T1 shape the six setter legs were patched for
       // (commit 50d04f8c). Defer with replay-time resolution: held while the
       // creation handshake is pending, executed inline (one re-resolve) for
@@ -1167,7 +1167,7 @@ impl Window {
     // Same two-phase shape as Window::set_content_protection below.
     if window_attrs.content_protection && openharmony_ability::sdk_api_version() >= 15 {
       if let Some(id) = window_id {
-        // PR#28 review T28-3: same T1-shape fix as the decorations seed — the
+        // PR#28 review T28-3: same T1-shape fix as the decorations seed -- the
         // eager `bridge_client` read dropped the initial content-protection
         // dispatch when the bridge was not yet resolvable. Defer with
         // replay-time resolution (held while the handshake is pending).
@@ -1228,7 +1228,7 @@ impl Window {
   /// operation retries the construction-time `WindowExt::window()` (a
   /// non-blocking RwLock read + clone) and overwrites the cache on success.
   /// A persistent failure returns `None` with a warn emitted exactly once
-  /// (see [`bridge_client_cached_or_refetch`]) — the caller then degrades to
+  /// (see [`bridge_client_cached_or_refetch`]) -- the caller then degrades to
   /// a no-op.
   fn bridge_client(&self, op: &str) -> Option<openharmony_ability_plugin_window::WindowClient> {
     bridge_client_cached_or_refetch(
@@ -1271,10 +1271,10 @@ impl Window {
   }
 
   /// PR review fix T1: the client-unavailable fallback of
-  /// [`Self::spawn_or_queue`] — same queue, but the future is built at
+  /// [`Self::spawn_or_queue`] -- same queue, but the future is built at
   /// execution time from a freshly resolved client (see
   /// [`enqueue_deferred_window_op`], including its coverage boundary for the
-  /// always-ready primary window — PR#28 review T28-3). The client-available
+  /// always-ready primary window -- PR#28 review T28-3). The client-available
   /// fast path in the setters is behavior-identical to before; only the
   /// previously-dropped `bridge_client() == None` leg now enqueues.
   fn spawn_or_queue_deferred<F, Fut>(&self, op: &str, make_future: F)
@@ -1297,7 +1297,7 @@ impl Window {
 
   /// #168 (design D1): seed/replay the creation-time attrs at build() tail.
   ///
-  /// Both halves ride the existing setter channel — every setter below funnels
+  /// Both halves ride the existing setter channel -- every setter below funnels
   /// through [`Self::dispatch_or_queue`], so a window whose creation handshake
   /// is still pending gets its seeds queued in [`PENDING_WINDOW_OPS`] and
   /// replayed FIFO by [`drain_ready_pending_window_ops`] (zero new
@@ -1308,7 +1308,7 @@ impl Window {
     // Issue Eulogizethesun/tauri#238 (design D7): a UIAbility-kind window
     // created with button-seed attrs (minimizable/maximizable/closable
     // false) cannot honor
-    // them — warn + ignore (a soft preference must not fail creation), while
+    // them -- warn + ignore (a soft preference must not fail creation), while
     // the sub-window path keeps seeding the LocalStorage that drives the
     // SubWindowPage buttons.
     let is_ui_ability_window = self.is_ui_ability_window();
@@ -1328,7 +1328,7 @@ impl Window {
         .decoration_flags
         .store(plan.mirror_flags, Ordering::Release);
     }
-    // Sub-window decoration seed: #238 — the ArkTS setDecorationFlags handler
+    // Sub-window decoration seed: #238 -- the ArkTS setDecorationFlags handler
     // throws for UIAbility-kind windows (the id-0 main window and spawned
     // UIAbility instances), so only sub-windows dispatch this command (the
     // main window's resizable attr rides the set_resize_by_drag seed below;
@@ -1350,7 +1350,7 @@ impl Window {
           });
         } else {
           // PR review fix T1: the eager `if let Some(client)` dropped the
-          // dispatch when the bridge client was not yet resolvable — the
+          // dispatch when the bridge client was not yet resolvable -- the
           // cache kept the flags but the ArkTS side never saw them. Defer
           // with a replay-time resolution (consistent with the setter legs
           // below).
@@ -1370,14 +1370,14 @@ impl Window {
       }
     }
     // Resize seed (#238 design D7): `resizable(false)` has a real surface
-    // only in the edge-drag switch (issue Eulogizethesun/tauri#104) — the
+    // only in the edge-drag switch (issue Eulogizethesun/tauri#104) -- the
     // same `set_resize_by_drag` leg the runtime `set_resizable` dispatches,
     // so the seed mirrors that call shape (spawn_or_queue + the T1 deferred
     // fallback). Landing branch by the unified `windowId === 0` criterion
-    // (PR#28 review T28-5): id 0 → setResizeByDragEnabled; spawned
-    // UIAbility instances and sub-windows (id > 0) → the enableDrag
+    // (PR#28 review T28-5): id 0 -> setResizeByDragEnabled; spawned
+    // UIAbility instances and sub-windows (id > 0) -> the enableDrag
     // sub-window branch. Gate F1: every kind plans this seed when
-    // resizable(false) — a sub-window rides it ALONGSIDE the
+    // resizable(false) -- a sub-window rides it ALONGSIDE the
     // decoration-flags leg (the runtime setter's dual dispatch), so the
     // edge-drag switch is seeded at creation time too.
     if let Some(drag) = plan.resize_by_drag {
@@ -1393,7 +1393,7 @@ impl Window {
             }
           });
         } else {
-          // PR review fix T1: defer with a replay-time client resolution —
+          // PR review fix T1: defer with a replay-time client resolution --
           // see the sub-window decoration leg above.
           self.spawn_or_queue_deferred("seed_creation_attrs", move |client| async move {
             if let Err(e) = client.set_resize_by_drag(window_id, drag).await {
@@ -1411,7 +1411,7 @@ impl Window {
     if plan.always_on_top {
       self.set_always_on_top(true);
     }
-    // Replay half — upstream windows/window.rs:1338-1339 form: fullscreen
+    // Replay half -- upstream windows/window.rs:1338-1339 form: fullscreen
     // takes precedence over maximized (else-if).
     if let Some(fullscreen) = plan.fullscreen {
       self.set_fullscreen(Some(fullscreen));
@@ -1419,7 +1419,7 @@ impl Window {
       self.set_maximized(true);
     }
     // focused: upstream never calls set_focus() from the attribute (see
-    // [`CreationAttrPlan::no_initial_focus`]) — only the explicit
+    // [`CreationAttrPlan::no_initial_focus`]) -- only the explicit
     // "don't focus on creation" leg replays, through set_focusable(false).
     if plan.no_initial_focus {
       self.set_focusable(false);
@@ -1459,7 +1459,7 @@ impl Window {
     let Some(client) = self.bridge_client("set_window_limits") else {
       // PR review fix T1: the builder-time constraints dispatch (a seed leg
       // like the ones in seed_creation_attrs) was dropped when the bridge
-      // client was not yet resolvable — the cache slots kept the values but
+      // client was not yet resolvable -- the cache slots kept the values but
       // the system limits were never pushed. Defer with a replay-time
       // resolution (values captured as of call time, the same queue
       // semantics as spawn_or_queue).
@@ -1504,7 +1504,7 @@ impl Window {
   pub fn id(&self) -> WindowId {
     // Phase 3 (design.md D6): return this window's own OHOS windowId instead of
     // the ZST constant, so tauri-runtime-wry's window_id_map routes events to the
-    // correct WindowWrapper. Main window → WindowId(0), sub-window → WindowId(N).
+    // correct WindowWrapper. Main window -> WindowId(0), sub-window -> WindowId(N).
     WindowId(self.window_id.unwrap_or(0))
   }
 
@@ -1727,12 +1727,12 @@ impl Window {
     //
     // On a SUB-window the d.ts dual semantics make `minimize()` THE hide
     // primitive: it hides the window and `showWindow()` restores it
-    // (@since 12) — the blanket no-op regressed every sub-window hide
+    // (@since 12) -- the blanket no-op regressed every sub-window hide
     // caller (the old behavior is restored). The dispatch rides the T1
     // deferred leg: queued while the creation handshake is pending, and
     // re-resolving the client at execution time instead of being dropped
     // when the bridge is not yet up (this also makes the leg observable to
-    // the #237 UTs without a live client — PR#28 review T28-1).
+    // the #237 UTs without a live client -- PR#28 review T28-1).
     if !visibility {
       if self.is_ui_ability_window() {
         log::error!(
@@ -1741,7 +1741,7 @@ impl Window {
         );
         return;
       }
-      // Sub-window hide intent: an OPTIMISTIC partial mirror — only the
+      // Sub-window hide intent: an OPTIMISTIC partial mirror -- only the
       // visible/minimized pair is written (visible=false, minimized=true) so
       // is_visible()/is_minimized() read the hidden state until the system
       // truth arrives (minimized=true is what the show path's restore leg
@@ -1751,7 +1751,7 @@ impl Window {
       // windowStatusChange Minimize event IS system truth about the whole
       // window state, while this hide dispatch (the d.ts dual-semantics
       // minimize() used as a hide primitive) carries no fullscreen/maximized
-      // observation — the two bits stay at their previously recorded intent
+      // observation -- the two bits stay at their previously recorded intent
       // until a real windowStatusChange backfills them.
       self.mirror.minimized.store(true, Ordering::Release);
       self.mirror.visible.store(false, Ordering::Release);
@@ -1769,7 +1769,7 @@ impl Window {
     // Issue Eulogizethesun/tauri#237 (show path): restore is dispatched ONLY
     // when the local mirror says minimized. The former unconditional
     // restore+show double-dispatch un-maximized visible maximized windows
-    // (restore on a non-minimized window cancels maximization — the
+    // (restore on a non-minimized window cancels maximization -- the
     // WindowManager.ets showWindowMethod guard documents the hazard). A plain
     // visible window gets show-only (a raise), never touching its maximize
     // state. The mirror is cleared only on the restore leg, matching the
@@ -1777,7 +1777,7 @@ impl Window {
     // the structured warn below still fires).
     let minimized = self.mirror.minimized.load(Ordering::Acquire);
     // Show intent (T28-4 mirror contract): pairs with the hide intent write
-    // in the false leg — is_visible() must not stay false after the window
+    // in the false leg -- is_visible() must not stay false after the window
     // is shown again.
     self.mirror.visible.store(true, Ordering::Release);
     // TODO(A1): replace with AppControlExt::show_ability(env) when A1 adds the action
@@ -1828,7 +1828,7 @@ impl Window {
   pub fn set_focusable(&self, focusable: bool) {
     if let Some(window_id) = self.window_id {
       // #174 (2026-10-21 device arbitration): the `window_id > 0` gate that
-      // historically no-op'd the main window is removed — the main window
+      // historically no-op'd the main window is removed -- the main window
       // (id 0) dispatches through the same bridge path as sub-windows.
       // The OS arbitrates: `win.setFocusable` (WindowPlugin.ets set-focusable
       // action) succeeds on the main window (probe evidence in the phase
@@ -1839,7 +1839,7 @@ impl Window {
       let Some(client) = self.bridge_client("set_focusable") else {
         // PR review fix T1: the client check ran before the queue check, so a
         // seed (or runtime call) in the bridge-unavailable state never
-        // entered PENDING_WINDOW_OPS — the creation-time no_initial_focus
+        // entered PENDING_WINDOW_OPS -- the creation-time no_initial_focus
         // seed was permanently lost. Defer with a replay-time resolution.
         self.spawn_or_queue_deferred("set_focusable", move |client| async move {
           if let Err(e) = client.set_window_focusable(window_id, focusable).await {
@@ -1911,8 +1911,8 @@ impl Window {
   // set_closable only control decoration button visibility (the
   // SubWindowPage @LocalStorageProp) and do not block the programmatic APIs; a
   // UIAbility-kind window errors out for them (issue Eulogizethesun/tauri#238
-  // — the buttons are OS-managed). set_resizable is the exception since issue
-  // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
+  // -- the buttons are OS-managed). set_resizable is the exception since issue
+  // Eulogizethesun/tauri#104 -- see below (it stays ungated: it has a real
   // UIAbility-kind surface in set_resize_by_drag (main id-0 and spawned
   // instances alike). is_resizable etc. read from the local mirror for
   // sub-windows; UIAbility-kind button queries report
@@ -1921,7 +1921,7 @@ impl Window {
     if self.is_ui_ability_window() {
       // PR#28 review T28-2: the ArkTS setDecorationFlags handler throws for
       // EVERY UIAbility-kind window (the bootstrap main window and spawned
-      // instances alike — the same gate creation time already dropped the
+      // instances alike -- the same gate creation time already dropped the
       // command for, commit 18c96db), so the runtime setter must not
       // dispatch it either. Local mirror only: the set_inner_size
       // FLAG_RESIZABLE gate reads this cache.
@@ -1935,7 +1935,7 @@ impl Window {
     // criterion): the decoration flag only covers title-bar button
     // visibility (sub-windows) and the programmatic-resize gate
     // (set_inner_size checks FLAG_RESIZABLE). The actual user-facing switch
-    // is edge-drag resizing — dispatched through the same
+    // is edge-drag resizing -- dispatched through the same
     // `set-resize-by-drag` action, whose ArkTS routing keys on
     // `windowId === 0`: the primary main window lands on
     // setResizeByDragEnabled (API 14+, effective in free-window state),
@@ -1946,7 +1946,7 @@ impl Window {
     // Dispatched through the T1 deferred leg (same discipline as the
     // set_visible show path): the client is resolved at execution time, so a
     // call fired while the creation handshake is pending is QUEUED and
-    // replayed instead of being silently dropped by the eager read — and the
+    // replayed instead of being silently dropped by the eager read -- and the
     // leg is observable to the UTs without a bridge client (PENDING_WINDOW_OPS
     // entry).
     if let Some(window_id) = self.window_id {
@@ -1965,11 +1965,11 @@ impl Window {
 
   /// Whether this window is of the UIAbility KIND (issue
   /// Eulogizethesun/tauri#238): the id-0 bootstrap main window AND later
-  /// spawned UIAbility instances — both get system-provided decorations, with
+  /// spawned UIAbility instances -- both get system-provided decorations, with
   /// no API mapping to the per-button enable/disable flag semantics, and
   /// both reject the UIAbility-hostile ops (decoration-flags dispatch,
   /// window-level hide). PR#28 review gate F7: renamed from
-  /// `is_ui_ability_main_window` — the predicate is KIND-based, not
+  /// `is_ui_ability_main_window` -- the predicate is KIND-based, not
   /// id-based, and "main window" understated its reach: a spawned UIAbility
   /// instance (id > 0) takes every branch gated here too. The gate must NOT
   /// be narrowed to `window_id == Some(0)`: a spawned instance falling
@@ -1984,7 +1984,7 @@ impl Window {
   pub fn set_minimizable(&self, minimizable: bool) {
     // Issue Eulogizethesun/tauri#238: UIAbility-kind windows (the id-0
     // main window and spawned instances) have OS-managed decoration
-    // buttons — OpenHarmony exposes no API mapping to the per-button
+    // buttons -- OpenHarmony exposes no API mapping to the per-button
     // enable/disable flag semantics (visibility/style APIs exist; operation
     // control does not). The
     // former silent bit-write + LocalStorage dispatch faked success (and the
@@ -2003,7 +2003,7 @@ impl Window {
   }
 
   pub fn set_maximizable(&self, maximizable: bool) {
-    // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
+    // Issue Eulogizethesun/tauri#238 -- see set_minimizable for the rationale.
     if self.is_ui_ability_window() {
       log::error!(
         "[tao-ohos] set_maximizable({}): not supported on OpenHarmony for UIAbility-kind windows (the id-0 bootstrap main window and spawned instances; OS-managed decoration buttons) — ignored for window {:?}",
@@ -2016,7 +2016,7 @@ impl Window {
   }
 
   pub fn set_closable(&self, closable: bool) {
-    // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
+    // Issue Eulogizethesun/tauri#238 -- see set_minimizable for the rationale.
     if self.is_ui_ability_window() {
       log::error!(
         "[tao-ohos] set_closable({}): not supported on OpenHarmony for UIAbility-kind windows (the id-0 bootstrap main window and spawned instances; OS-managed decoration buttons) — ignored for window {:?}",
@@ -2047,10 +2047,10 @@ impl Window {
   /// dispatch the full bitfield to ArkTS (SubWindowPage LocalStorage). The
   /// dispatch rides the T1 deferred leg (client resolved at execution time):
   /// a sub-window still awaiting its creation handshake gets the dispatch
-  /// QUEUED and replayed instead of silently dropped by the eager read —
+  /// QUEUED and replayed instead of silently dropped by the eager read --
   /// and the leg is observable to the UTs without a bridge client
   /// (PENDING_WINDOW_OPS entry). UIAbility-kind windows must not route here
-  /// (the ArkTS setDecorationFlags handler throws for them) — they use
+  /// (the ArkTS setDecorationFlags handler throws for them) -- they use
   /// [`Self::store_decoration_flag`] (see set_resizable, T28-2).
   fn set_decoration_flag(&self, flag: u8, on: bool) {
     self.store_decoration_flag(flag, on);
@@ -2135,7 +2135,7 @@ impl Window {
               );
             }
           } else {
-            // recover() switches MAXIMIZE/FULL_SCREEN → FLOATING (API7+,
+            // recover() switches MAXIMIZE/FULL_SCREEN -> FLOATING (API7+,
             // public)
             if let Err(e) = client.recover_window(window_id).await {
               log::warn!(
@@ -2255,7 +2255,7 @@ impl Window {
   }
   pub fn set_always_on_bottom(&self, _always_on_bottom: bool) {
     // Committer Eulogizethesun/tauri#171: surface the no-op instead of failing
-    // silently (signature intentionally stays `()` — no `Err`, per the md
+    // silently (signature intentionally stays `()` -- no `Err`, per the md
     // wave-0 ruling), aligned with the iOS `log::warn!` precedent.
     log::warn!("[tao-ohos] set_always_on_bottom is not supported on OHOS; call ignored");
   }
@@ -2269,7 +2269,7 @@ impl Window {
     self.always_on_top.store(always_on_top, Ordering::Release);
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_always_on_top") else {
-        // PR review fix T1: the spec scenario — a window created with
+        // PR review fix T1: the spec scenario -- a window created with
         // with_always_on_top(true) while the bridge client is not yet ready
         // MUST queue the seed and replay it after the handshake. The eager
         // client check dropped it before the queue check; defer instead.
@@ -2336,11 +2336,11 @@ impl Window {
   pub fn is_minimizable(&self) -> bool {
     // Issue Eulogizethesun/tauri#238: a UIAbility-kind window's buttons are
     // OS-managed
-    // and always available — report the true state instead of the local bit
+    // and always available -- report the true state instead of the local bit
     // (which no longer tracks anything for UIAbility windows since the
     // setters error out). Known edge (documented in the tauri rustdoc too):
     // set_decorations(false)/setWindowDecorVisible hides the WHOLE bar; these
-    // queries still report true — same as upstream Win32, where the
+    // queries still report true -- same as upstream Win32, where the
     // WS_MINIMIZEBOX-style styles stay independent of the visible chrome.
     if self.is_ui_ability_window() {
       return true;
@@ -2349,7 +2349,7 @@ impl Window {
   }
 
   pub fn is_maximizable(&self) -> bool {
-    // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
+    // Issue Eulogizethesun/tauri#238 -- see is_minimizable for the rationale.
     if self.is_ui_ability_window() {
       return true;
     }
@@ -2357,7 +2357,7 @@ impl Window {
   }
 
   pub fn is_closable(&self) -> bool {
-    // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
+    // Issue Eulogizethesun/tauri#238 -- see is_minimizable for the rationale.
     if self.is_ui_ability_window() {
       return true;
     }
@@ -2585,7 +2585,7 @@ impl Window {
   pub fn drag_window(&self) -> Result<(), error::ExternalError> {
     // OHOS startMoving (API14+) must be called in onTouch(TouchType.Down) —
     // cannot be triggered programmatically from Rust. Sub-windows drag
-    // via SubWindowPage title bar onTouch→startMoving; the main UIAbility window
+    // via SubWindowPage title bar onTouch->startMoving; the main UIAbility window
     // has no such path, so this is a no-op there. Returns Ok (no error) since
     // drag is handled at the UI layer (SubWindowPage), not via this API.
     log::debug!(
@@ -3011,7 +3011,7 @@ mod tests {
   // dispatch_or_queue channel. The decision is `creation_attr_plan` (pure);
   // the enqueue/inline legs run the extracted production body
   // `dispatch_or_queue_op` with sentinel ids (a `Window` cannot be
-  // constructed outside a bridge session — same discipline as the O10-6
+  // constructed outside a bridge session -- same discipline as the O10-6
   // test above).
 
   /// UT for #168 (a): a build() carrying `always_on_top(true)` with the
@@ -3073,7 +3073,7 @@ mod tests {
     drain_ready_pending_window_ops();
     assert!(ran.load(Ordering::SeqCst), "held seed not replayed");
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    // semicolon -- a panic here must not poison PENDING_WINDOW_OPS.
     let still_queued = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3084,10 +3084,10 @@ mod tests {
   }
 
   /// UT for #168 (b): decoration-attr differences plan ONE combined
-  /// set-decoration-flags seed carrying the attr-derived bitfield — each
+  /// set-decoration-flags seed carrying the attr-derived bitfield -- each
   /// false attr clears exactly its own bit (the maximizable clear matters
   /// downstream: set_maximized(true)'s guard reads FLAG_MAXIMIZABLE).
-  /// Sub-window leg (`is_ui_ability_window = false`) — the dispatch and the local mirror
+  /// Sub-window leg (`is_ui_ability_window = false`) -- the dispatch and the local mirror
   /// stay coupled there; the UIAbility kind (main window and spawned
   /// instances) diverges (see the #238 test below).
   /// Gate F1: a sub-window resizable(false) additionally plans the
@@ -3128,7 +3128,7 @@ mod tests {
     );
   }
 
-  /// UT for #168 (c): default attributes plan zero dispatches — the spec's
+  /// UT for #168 (c): default attributes plan zero dispatches -- the spec's
   /// "default attributes produce no extra traffic" scenario, on both window
   /// kinds (the mirror bitfield stays at its default too, so the decoupled
   /// mirror store at the call site is skipped).
@@ -3163,7 +3163,7 @@ mod tests {
   }
 
   /// UT for #238 (design D7): UIAbility-kind windows never plan a
-  /// set_window_decoration_flags dispatch — the ArkTS handler throws for
+  /// set_window_decoration_flags dispatch -- the ArkTS handler throws for
   /// UIAbility-kind windows (the id-0 main window and spawned UIAbility
   /// instances), so a dispatch there is a guaranteed-fail warn.
   /// The sub-window path (`is_ui_ability_window = false`, exercised by the #168 tests
@@ -3173,19 +3173,19 @@ mod tests {
     // Brief:
     // 1. Main-window attrs with all three button bits false must plan NO
     //    decoration dispatch and leave the mirror at the all-ones default
-    //    (OS-managed buttons — warn+ignore at the call site).
+    //    (OS-managed buttons -- warn+ignore at the call site).
     // 2. resizable(false) on the main window must NOT plan a decoration
-    //    dispatch (guaranteed ArkTS throw) — instead it plans the
+    //    dispatch (guaranteed ArkTS throw) -- instead it plans the
     //    set_resize_by_drag(false) seed leg (#104) while the mirror keeps
     //    ONLY the resizable bit cleared (the programmatic-resize gate in
     //    set_inner_size reads that cache; the D7 disclosure keeps the
     //    set_maximized guard passing).
     // 3. resizable(true) (the default) on the main window plans no resize
-    //    seed — default attrs produce zero traffic.
+    //    seed -- default attrs produce zero traffic.
     // 4. The same button attrs on a sub window (is_ui_ability_window = false) keep
     //    today's per-bit seed and its coupled mirror (no behavior change);
     //    with the default resizable(true) no drag seed is planned either.
-    // 5. Gate F1: a sub window created resizable(false) plans BOTH legs —
+    // 5. Gate F1: a sub window created resizable(false) plans BOTH legs --
     //    the decoration bit (SubWindowPage LocalStorage) AND the
     //    set_resize_by_drag(false) edge-drag seed, mirroring the runtime
     //    set_resizable dual dispatch.
@@ -3269,7 +3269,7 @@ mod tests {
   }
 
   /// UT for #168 (d): a seed dispatched while the window is already ready runs
-  /// inline — no queue entry, nothing to replay (same semantics as the
+  /// inline -- no queue entry, nothing to replay (same semantics as the
   /// runtime setters).
   #[test]
   fn ut_creation_seed_dispatches_inline_when_ready() {
@@ -3291,7 +3291,7 @@ mod tests {
       "ready-window seed must dispatch inline"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    // semicolon -- a panic here must not poison PENDING_WINDOW_OPS.
     let queued_ops = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3304,7 +3304,7 @@ mod tests {
   // observable WITHOUT a bridge client (a real WindowClient needs a live
   // NAPI session a test binary does not have): the hide/show dispatches ride
   // the T1 deferred leg, so a pending-handshake window shows each op as a
-  // PENDING_WINDOW_OPS entry — the same dispatch-observable discipline as
+  // PENDING_WINDOW_OPS entry -- the same dispatch-observable discipline as
   // the #168 seed UTs. This closes the T28-1 blindness (the former UT's
   // `window_client: None` early-returned on the pre-#237 code too): the
   // sub-window UTs exercise the dispatch branch itself and FAIL on both
@@ -3355,7 +3355,7 @@ mod tests {
       "sub-window hide must flip the visible intent bit off (is_visible honesty)"
     );
     // Gate F9 (test hygiene): the queue state is bound to a local FIRST so
-    // the mutex guard is released before the assert — a panic inside the
+    // the mutex guard is released before the assert -- a panic inside the
     // assert must not poison PENDING_WINDOW_OPS and cascade into unrelated
     // UTs (the F8 fixwave mutation run hit exactly that).
     let queued_ops = PENDING_WINDOW_OPS
@@ -3372,7 +3372,7 @@ mod tests {
     drop_pending_window_ops(HIDING_ID);
   }
 
-  /// UT for #237: the UIAbility-window hide contract is an honest no-op — no
+  /// UT for #237: the UIAbility-window hide contract is an honest no-op -- no
   /// dispatch, no mirror write (the Err surfaces at the tauri-runtime-wry
   /// dispatcher). Discriminating-power note (T28-1): with
   /// `window_client: None` this leg also early-returns on the pre-#237
@@ -3417,7 +3417,7 @@ mod tests {
       "a refused UIAbility-window hide leaves the window untouched — is_visible stays true"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — see the paired sub-window UT above.
+    // semicolon -- see the paired sub-window UT above.
     let queued_ops = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3432,7 +3432,7 @@ mod tests {
 
   /// UT for #237 + T28-4: a SUB-window set_visible(true) queues the show
   /// dispatch and flips the visible intent bit back on (the mirror pair of
-  /// the hide leg; also locks the T1 deferred leg of the show path — the
+  /// the hide leg; also locks the T1 deferred leg of the show path -- the
   /// former eager `bridge_client` read dropped the show entirely when the
   /// client was unresolvable).
   #[test]
@@ -3473,7 +3473,7 @@ mod tests {
       "show on a non-minimized window must not write the minimized mirror (show-only leg)"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — see the paired hide UT above.
+    // semicolon -- see the paired hide UT above.
     let queued_ops = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3490,17 +3490,17 @@ mod tests {
 
   /// UT for PR#28 review T28-2: the RUNTIME set_resizable must not dispatch
   /// set-decoration-flags for a UIAbility-kind window (the ArkTS handler
-  /// throws for every UIAbility-kind window — bootstrap main AND spawned
+  /// throws for every UIAbility-kind window -- bootstrap main AND spawned
   /// instances alike, matching the kind-based `isUIAbilityMainWindow` gate in
   /// WindowManager.ets): the local FLAG_RESIZABLE mirror bit must update, and
-  /// the queue must hold EXACTLY ONE op — the edge-drag leg (whose branch
+  /// the queue must hold EXACTLY ONE op -- the edge-drag leg (whose branch
   /// landing is the ArkTS `windowId === 0` routing, T28-5). A decoration
   /// dispatch would enter a second op. The paired sub-window arm locks the
   /// dual dispatch (decoration bit + drag leg = two ops) that the main window
   /// must not have. Discriminating power (T28-1 discipline): on the pre-fix
   /// code both legs were eager `bridge_client` reads that dropped with
   /// `window_client: None`, so the queue stayed EMPTY and the length
-  /// assertions FAIL — the UT cannot pass without the deferred legs.
+  /// assertions FAIL -- the UT cannot pass without the deferred legs.
   #[test]
   fn ut_set_resizable_ui_ability_window_no_decoration_dispatch_drag_leg_once() {
     const MAIN_ID: i64 = i64::MAX - 34;
@@ -3540,7 +3540,7 @@ mod tests {
       "the local FLAG_RESIZABLE mirror bit must clear on a UIAbility window (the set_inner_size gate reads it)"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    // semicolon -- a panic here must not poison PENDING_WINDOW_OPS.
     let main_queued_ops = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3553,7 +3553,7 @@ mod tests {
     );
 
     // Sub-window arm: the dual dispatch is intentional there (decoration bit
-    // for the SubWindowPage LocalStorage + the drag leg) — two queued ops.
+    // for the SubWindowPage LocalStorage + the drag leg) -- two queued ops.
     let sub = make_window(SUB_ID, OHOSWindowKind::SubWindow);
     sub.set_resizable(false);
     let sub_queued_ops = PENDING_WINDOW_OPS
@@ -3574,8 +3574,8 @@ mod tests {
   }
 
   /// UT for PR#28 review gate F1: a SUB-window created with resizable(false)
-  /// seeds BOTH legs — the decoration-flags bit (SubWindowPage LocalStorage)
-  /// AND the set_resize_by_drag(false) edge-drag seed — mirroring the runtime
+  /// seeds BOTH legs -- the decoration-flags bit (SubWindowPage LocalStorage)
+  /// AND the set_resize_by_drag(false) edge-drag seed -- mirroring the runtime
   /// set_resizable dual dispatch (creation/runtime isomorphism). On the
   /// pre-fix plan the drag seed was only planned for UIAbility-kind windows,
   /// so the sub-window creation leg queued ONE op and the first assert fails
@@ -3583,7 +3583,7 @@ mod tests {
   /// baseline (the 2 ops are the two legs, not stray traffic). Sentinel id +
   /// pending registration + window_client: None, same dispatch-observable
   /// discipline as the T28-1 UTs; the ArkTS branch landing stays the
-  /// `windowId === 0` routing (T28-5) — enableDrag for this id > 0 window.
+  /// `windowId === 0` routing (T28-5) -- enableDrag for this id > 0 window.
   #[test]
   fn ut_creation_seed_sub_window_resizable_false_queues_both_legs() {
     const SEED_ID: i64 = i64::MAX - 36;
@@ -3623,7 +3623,7 @@ mod tests {
     attrs.resizable = false;
     window.seed_creation_attrs(&attrs);
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    // semicolon -- a panic here must not poison PENDING_WINDOW_OPS.
     let seeded_ops = PENDING_WINDOW_OPS
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
@@ -3657,7 +3657,7 @@ mod tests {
   // --- PR review fix T1: the deferred-client seed leg. The eager
   // `bridge_client` resolution in the setters dropped a creation seed BEFORE
   // the queue check when the client was not yet resolvable (#184 early-init
-  // state) — the build()-tail seeds never entered PENDING_WINDOW_OPS and the
+  // state) -- the build()-tail seeds never entered PENDING_WINDOW_OPS and the
   // handshake drain had nothing to replay. `enqueue_deferred_window_op` is
   // the replay-time-resolution fallback. Sentinel client (a real
   // WindowClient needs a bridge session) + sentinel ids, same discipline as
@@ -3669,7 +3669,7 @@ mod tests {
   /// UT for T1: with the bridge unresolvable at call time and the creation
   /// handshake pending, the seed op is HELD in PENDING_WINDOW_OPS (not
   /// dropped); once the handshake completes AND the bridge resolves, the
-  /// next drain replays it — the future is then built from the freshly
+  /// next drain replays it -- the future is then built from the freshly
   /// resolved client. A degraded leg keeps the bridge down at replay: the op
   /// still runs (the queue is emptied, nothing stranded) and degrades to the
   /// structured warn without dispatching.
@@ -3691,7 +3691,7 @@ mod tests {
 
     let bridge_up = Arc::new(AtomicBool::new(false));
 
-    // Leg 1 — hold: bridge down + handshake pending → the op must be held,
+    // Leg 1 -- hold: bridge down + handshake pending -> the op must be held,
     // exactly the spec scenario (with_always_on_top(true) while the client
     // is not yet ready SHALL queue).
     openharmony_ability::register_pending_ui_ability(HELD_ID);
@@ -3719,7 +3719,7 @@ mod tests {
       "the deferred seed must not run while the handshake is pending"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
-    // semicolon — a panic here must not poison PENDING_WINDOW_OPS (the
+    // semicolon -- a panic here must not poison PENDING_WINDOW_OPS (the
     // assert-holding-guard shape cascaded a F8 mutation failure into
     // unrelated UTs).
     let held_ops = queue().get(&HELD_ID).map(|ops| ops.len());
@@ -3729,7 +3729,7 @@ mod tests {
       "the deferred seed must be held while the handshake is pending"
     );
 
-    // Leg 2 — replay: the bridge resolves + the handshake completes → the
+    // Leg 2 -- replay: the bridge resolves + the handshake completes -> the
     // drain runs the op, which resolves the client and dispatches.
     bridge_up.store(true, Ordering::SeqCst);
     openharmony_ability::register_ui_ability_stage(HELD_ID);
@@ -3747,9 +3747,9 @@ mod tests {
     assert!(!replay_removed, "the replayed entry must be removed");
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
 
-    // Leg 3 — degraded: the bridge never resolves. The op still runs at
+    // Leg 3 -- degraded: the bridge never resolves. The op still runs at
     // replay (the queue is emptied, no stranded entry) and the client-less
-    // body degrades to the structured warn — no dispatch, no panic.
+    // body degrades to the structured warn -- no dispatch, no panic.
     openharmony_ability::register_pending_ui_ability(DEGRADED_ID);
     enqueue_deferred_window_op(
       || None::<DeferredSeedClient>,
@@ -3771,7 +3771,7 @@ mod tests {
   }
 
   /// UT for #168 (replay half decision record): fullscreen and maximized are
-  /// both recorded when set — the fullscreen-takes-precedence ordering
+  /// both recorded when set -- the fullscreen-takes-precedence ordering
   /// (upstream windows/window.rs:1338-1339 else-if form) lives in
   /// seed_creation_attrs and is compiled against this plan shape.
   #[test]
@@ -3861,15 +3861,15 @@ mod tests {
   }
 
   /// UT for #184: a persistent re-fetch failure returns None with the warn
-  /// debounce tripping exactly once — the flag flips false→true on the first
+  /// debounce tripping exactly once -- the flag flips false->true on the first
   /// failure and holds on subsequent failures. Warn emission is gated 1:1 on
-  /// that false→true transition (asserted by the reset leg below), so
+  /// that false->true transition (asserted by the reset leg below), so
   /// consecutive failures with a fresh flag can never emit a second warn.
   #[test]
   fn ut_bridge_client_refetch_failure_returns_none_and_warns_once() {
     let cache: std::sync::Mutex<Option<DummyClient>> = std::sync::Mutex::new(None);
     let warned = AtomicBool::new(false);
-    // Bridge stays unavailable: app.window() errors → mapped to None here.
+    // Bridge stays unavailable: app.window() errors -> mapped to None here.
     let refetch = || None::<DummyClient>;
     assert_eq!(
       bridge_client_cached_or_refetch(&cache, refetch, "ut-op", &warned),
@@ -3918,7 +3918,7 @@ mod tests {
 
   /// UT for #173: set_mirror_focused writes the registered mirror through
   /// WINDOW_MIRRORS, and tolerates a miss (unknown id / already-dropped
-  /// window Weak) without panicking — event-loop focus arms must never fail
+  /// window Weak) without panicking -- event-loop focus arms must never fail
   /// on a mirror that went away.
   #[test]
   fn ut_set_mirror_focused_writes_and_tolerates_miss() {
