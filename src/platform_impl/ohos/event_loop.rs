@@ -320,7 +320,17 @@ pub(crate) fn cursor_position_from_app(
     .cursor_position()
     .map(|(x, y)| PhysicalPosition::new(x, y))
     .map_err(|CursorUntracked| {
-      log::warn!("cursor_position: untracked (no mouse feed ever recorded) → NotSupported");
+      // PR#28 review T28-10: a polling caller hits this branch on every read
+      // while no mouse feed has ever arrived — warn once, then drop to debug,
+      // so the hilog cannot be flooded. The condition only clears by the
+      // first feed arriving (after which the read succeeds and this branch
+      // never fires again), so a single latch is sufficient.
+      static UNTRACKED_WARNED: AtomicBool = AtomicBool::new(false);
+      if !UNTRACKED_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!("cursor_position: untracked (no mouse feed ever recorded) → NotSupported");
+      } else {
+        log::debug!("cursor_position: untracked (no mouse feed ever recorded) → NotSupported");
+      }
       error::ExternalError::NotSupported(error::NotSupportedError::new())
     })
 }
