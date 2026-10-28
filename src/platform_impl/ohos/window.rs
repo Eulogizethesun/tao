@@ -463,8 +463,9 @@ pub(crate) struct Window {
   window_id: Option<i64>,
   /// Resolved window kind (issue Eulogizethesun/tauri#238): UIAbility vs
   /// SubWindow. LOCAL decision input only — consumed by the
-  /// main-window decoration gates (three button setters error out, is_*
-  /// queries report the OS-managed truth), the creation-attr seed policy
+  /// UIAbility-kind decoration gates (the id-0 main window and spawned
+  /// instances alike; three button setters error out, is_* queries
+  /// report the OS-managed truth), the creation-attr seed policy
   /// (D7) and the runtime-wry `is_ui_ability_main` capture (via
   /// `WindowExtOpenHarmony::window_kind`).
   ///
@@ -513,7 +514,7 @@ pub(crate) struct Window {
   //     the real system z-order).
   //   - theme: per-window field removed, now reads global APP_THEME_OVERRIDE +
   //     app.config() colorMode (continuously refreshed by ConfigChanged).
-  //   See doc/OHOS-window-residual-issues.md (issue 5, 5.1/5.2/5.3).
+  //   See doc/OHOS窗口遗留问题.md in the tauri repo (issue 5, 5.1/5.2/5.3).
   /// always_on_top intent flag (OHOS has no direct API; records intent only, see set_always_on_top).
   always_on_top: AtomicBool,
   /// Decoration button availability bitfield. bit0 closable, bit1 maximizable,
@@ -556,7 +557,7 @@ pub(crate) struct Window {
 /// 1=FULL_SCREEN, 2=MAXIMIZE, 3=MINIMIZE, 4=FLOATING, 5=SPLIT_SCREEN.
 ///
 /// Used by [`WindowStateMirror::apply_window_status`] to backfill system truth
-/// into tao mirror bits. See doc/OHOS-window-residual-issues.md (issue 5, 5.3).
+/// into tao mirror bits. See doc/OHOS窗口遗留问题.md in the tauri repo (issue 5, 5.3).
 enum WindowStatus {
   FullScreen,
   Maximize,
@@ -750,8 +751,8 @@ struct CreationAttrPlan {
 /// (PR#28 review T28-5, unified `windowId === 0` criterion; gate F1 extended
 /// the seed to sub-windows, so a sub-window created resizable(false) rides
 /// BOTH the decoration-flags leg and the drag leg — same shape as the
-/// runtime setter). Runtime setters on the main
-/// window error out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
+/// runtime setter). Runtime setters on UIAbility-kind windows error
+/// out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
 /// always passes there — "always maximizable" is the disclosed consistent
 /// reading (D7).
 fn creation_attr_plan(
@@ -1704,7 +1705,7 @@ impl Window {
       return;
     };
     // Issue Eulogizethesun/tauri#237 + PR#28 review T28-4 (committer
-    // ruling): hide splits by window kind. On a MAIN (UIAbility) window
+    // ruling): hide splits by window kind. On a UIAbility (main) window
     // OHOS has NO window-level hide API (@ohos.window d.ts carries no
     // hide(); `minimize()` on a main window is a task-bar minimize with
     // different semantics, and `hideAbility()` is UIAbility-level and
@@ -1906,7 +1907,7 @@ impl Window {
   // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
   // main-window surface in set_resize_by_drag). is_resizable etc. read from
   // the local mirror for sub-windows; UIAbility-kind button queries report
-  // the OS-managed truth (#238). See doc/OHOS-window-residual-issues.md (issue 4).
+  // the OS-managed truth (#238). See doc/OHOS窗口遗留问题.md in the tauri repo (issue 4).
   pub fn set_resizable(&self, resizable: bool) {
     if self.is_ui_ability_window() {
       // PR#28 review T28-2: the ArkTS setDecorationFlags handler throws for
@@ -1972,8 +1973,9 @@ impl Window {
   }
 
   pub fn set_minimizable(&self, minimizable: bool) {
-    // Issue Eulogizethesun/tauri#238: the main window's decoration buttons are
-    // OS-managed — OpenHarmony exposes no API mapping to the per-button
+    // Issue Eulogizethesun/tauri#238: UIAbility-kind windows (the id-0
+    // main window and spawned instances) have OS-managed decoration
+    // buttons — OpenHarmony exposes no API mapping to the per-button
     // enable/disable flag semantics (visibility/style APIs exist; operation
     // control does not). The
     // former silent bit-write + LocalStorage dispatch faked success (and the
@@ -2358,7 +2360,7 @@ impl Window {
   pub fn set_cursor_icon(&self, icon: window::CursorIcon) {
     // TODO(issue 6): dispatched but not yet device-tested — verify style mapping
     //   coverage, touch-mode device behavior, and whether it works on
-    //   sub-windows. See doc/OHOS-window-residual-issues.md (issue 6).
+    //   sub-windows. See doc/OHOS窗口遗留问题.md in the tauri repo (issue 6).
     // Set cursor style by windowId (pointer.setPointerStyleSync), dispatched via
     // the window bridge facade fire-and-forget (ArkTS side delegates to
     // WindowManager.setPointerStyle, using the real OHOS window id).
@@ -2556,7 +2558,7 @@ impl Window {
     //   window-level): pointer.setPointerVisible is a global cursor toggle, while
     //   tao's semantics are window-level; under multiple windows it would also
     //   affect other windows.
-    //   See doc/OHOS-window-residual-issues.md (issue 6).
+    //   See doc/OHOS窗口遗留问题.md in the tauri repo (issue 6).
     // Global cursor visibility (pointer.setPointerVisible), dispatched via the
     // window bridge facade fire-and-forget (ArkTS side delegates to
     // WindowManager.setPointerVisible).
@@ -2958,8 +2960,9 @@ mod tests {
       order.lock().expect("order log poisoned").is_empty(),
       "op ran while the creation handshake was pending"
     );
+    let held_still_queued = queue().contains_key(&HELD_ID);
     assert!(
-      queue().contains_key(&HELD_ID),
+      held_still_queued,
       "queue dropped the op while the handshake was pending"
     );
 
@@ -2974,7 +2977,8 @@ mod tests {
       vec![1, 2],
       "queued ops not replayed in FIFO order"
     );
-    assert!(!queue().contains_key(&HELD_ID), "drained entry not removed");
+    let drained_removed = !queue().contains_key(&HELD_ID);
+    assert!(drained_removed, "drained entry not removed");
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
 
     // 3. Drop: ops still queued for a handle that went away are discarded
@@ -2988,10 +2992,8 @@ mod tests {
       .push(Box::new(move || flag.store(true, Ordering::SeqCst)));
     drop_pending_window_ops(DROPPED_ID);
     assert!(!dropped_ran.load(Ordering::SeqCst), "dropped op ran");
-    assert!(
-      !queue().contains_key(&DROPPED_ID),
-      "dropped entry not removed"
-    );
+    let dropped_removed = !queue().contains_key(&DROPPED_ID);
+    assert!(dropped_removed, "dropped entry not removed");
     openharmony_ability::unregister_pending_ui_ability(DROPPED_ID);
   }
 
@@ -3076,7 +3078,8 @@ mod tests {
   /// false attr clears exactly its own bit (the maximizable clear matters
   /// downstream: set_maximized(true)'s guard reads FLAG_MAXIMIZABLE).
   /// Sub-window leg (`is_ui_ability_window = false`) — the dispatch and the local mirror
-  /// stay coupled there; the main window diverges (see the #238 test below).
+  /// stay coupled there; the UIAbility kind (main window and spawned
+  /// instances) diverges (see the #238 test below).
   /// Gate F1: a sub-window resizable(false) additionally plans the
   /// set_resize_by_drag(false) seed (the runtime setter's dual dispatch).
   #[test]
@@ -3149,7 +3152,7 @@ mod tests {
     }
   }
 
-  /// UT for #238 (design D7): the main window never plans a
+  /// UT for #238 (design D7): UIAbility-kind windows never plan a
   /// set_window_decoration_flags dispatch — the ArkTS handler throws for
   /// UIAbility-kind windows (the id-0 main window and spawned UIAbility
   /// instances), so a dispatch there is a guaranteed-fail warn.
@@ -3359,7 +3362,7 @@ mod tests {
     drop_pending_window_ops(HIDING_ID);
   }
 
-  /// UT for #237: the MAIN-window hide contract is an honest no-op — no
+  /// UT for #237: the UIAbility-window hide contract is an honest no-op — no
   /// dispatch, no mirror write (the Err surfaces at the tauri-runtime-wry
   /// dispatcher). Discriminating-power note (T28-1): with
   /// `window_client: None` this leg also early-returns on the pre-#237
@@ -3397,11 +3400,11 @@ mod tests {
 
     assert!(
       !mirror.minimized.load(Ordering::Acquire),
-      "a refused main-window hide must not write the minimized mirror"
+      "a refused UIAbility-window hide must not write the minimized mirror"
     );
     assert!(
       mirror.visible.load(Ordering::Acquire),
-      "a refused main-window hide leaves the window untouched — is_visible stays true"
+      "a refused UIAbility-window hide leaves the window untouched — is_visible stays true"
     );
     // Gate F9 (test hygiene): bind before assert, guard released on the
     // semicolon — see the paired sub-window UT above.
@@ -3411,7 +3414,7 @@ mod tests {
       .contains_key(&HIDING_ID);
     assert!(
       !queued_ops,
-      "main-window set_visible(false) must not queue any window op"
+      "UIAbility-window set_visible(false) must not queue any window op"
     );
     openharmony_ability::unregister_pending_ui_ability(HIDING_ID);
     drop_pending_window_ops(HIDING_ID);

@@ -1064,7 +1064,8 @@ impl<T: 'static> EventLoop<T> {
 
       // Issue 7: replay window ops queued against spawned UIAbility windows
       // whose stage handshake completed since the last pass (the D7
-      // registration waker wakes the loop).
+      // registration waker wakes the loop), and against sub-windows whose
+      // ArkTS creation chain settled (the sub-window settle waker).
       drain_ready_pending_window_ops();
 
       match event {

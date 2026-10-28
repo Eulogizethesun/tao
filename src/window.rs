@@ -902,8 +902,9 @@ impl Window {
   /// - **Android:** Unsupported.
   /// - **iOS:** Can only be called on the main thread.
   /// - **OpenHarmony:** split by window kind (issue Eulogizethesun/tauri#237).
-  ///   On the main (UIAbility) window hiding is not supported (no
-  ///   window-level hide API): `set_visible(false)` logs and leaves the
+  ///   On UIAbility windows (the id-0 main window and spawned
+  ///   instances) hiding is not supported (no window-level hide API):
+  ///   `set_visible(false)` logs and leaves the
   ///   window untouched — the tauri layer surfaces an `ohos_unsupported`
   ///   error for it. On sub-windows `set_visible(false)` hides the window
   ///   (the d.ts `minimize()` dual semantics; `showWindow()` restores it)
@@ -1087,8 +1088,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** reads the local mirror. A refused main-window hide
-  ///   keeps reporting visible (the window was left untouched); a sub-window
+  /// - **OpenHarmony:** reads the local mirror. A refused UIAbility-window
+  ///   hide keeps reporting visible (the window was left untouched); a sub-window
   ///   hide flips it off until the next show or window-status event.
   #[inline]
   pub fn is_visible(&self) -> bool {
