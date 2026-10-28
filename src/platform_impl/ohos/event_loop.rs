@@ -2612,13 +2612,25 @@ mod focus_scale_tests {
 /// installed once per process (log::set_boxed_logger is one-shot) and
 /// records (level, message) pairs; other #[test]s may log concurrently, so
 /// the assertions filter on the exact untracked-cursor message.
+///
+/// PR#28 round-2 gate F6 (precondition note): this UT relies on the
+/// CONVENTION that no other tao UT feeds the process cursor statics - there
+/// is no mechanical lock enforcing it. The `CAPTURED_LOGS` capture buffer
+/// and openharmony-ability's `EVER_FED` cursor static are shared across
+/// every test in the process, so any future feed-side UT must be serialized
+/// or isolated against this module, otherwise the shared state turns these
+/// assertions randomly red.
 #[cfg(test)]
 mod cursor_untracked_tests {
   use super::*;
 
-  static CAPTURED_LOGS: std::sync::LazyLock<
-    std::sync::Mutex<Vec<(log::Level, String)>>,
-  > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+  // std::sync::LazyLock requires Rust 1.80. The consumer-facing MSRV of the
+  // published library stays at Cargo.toml's `rust-version = "1.74"`: this
+  // static lives inside `#[cfg(test)]` device-UT code only, whose toolchain
+  // is pinned by the OHOS device toolchain (>= 1.80). Dev-test code must not
+  // tighten the published MSRV.
+  static CAPTURED_LOGS: std::sync::LazyLock<std::sync::Mutex<Vec<(log::Level, String)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
   struct CaptureLogger;
 

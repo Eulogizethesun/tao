@@ -680,9 +680,9 @@ struct CreationAttrPlan {
   /// `None` = identical to the `FLAG_ALL_DECORATIONS` default → zero
   /// dispatch. Always `None` on a UIAbility-kind window (the bootstrap main
   /// window and spawned instances alike): the ArkTS setDecorationFlags
-  /// handler throws for a UIAbility main window (issue
-  /// Eulogizethesun/tauri#238), so a dispatch there is a guaranteed-fail
-  /// warn — sub-windows only.
+  /// handler throws for UIAbility-kind windows (the id-0 main window and
+  /// spawned UIAbility instances; issue Eulogizethesun/tauri#238), so a
+  /// dispatch there is a guaranteed-fail warn — sub-windows only.
   decoration_flags: Option<u8>,
   /// Resize seed (#238 design D7 + issue Eulogizethesun/tauri#104):
   /// `Some(false)` when `attrs.resizable` is `false` — the resizable attr's
@@ -789,11 +789,7 @@ fn creation_attr_plan(
     // `set_resizable` dual dispatch so creation and runtime stay isomorphic;
     // the ArkTS branch (setResizeByDragEnabled vs enableDrag) is still
     // decided solely by the `windowId === 0` routing (T28-5).
-    resize_by_drag: if !attrs.resizable {
-      Some(false)
-    } else {
-      None
-    },
+    resize_by_drag: if !attrs.resizable { Some(false) } else { None },
     fullscreen: attrs.fullscreen.clone(),
     maximized: attrs.maximized,
     no_initial_focus: !attrs.focused,
@@ -1331,9 +1327,10 @@ impl Window {
         .store(plan.mirror_flags, Ordering::Release);
     }
     // Sub-window decoration seed: #238 — the ArkTS setDecorationFlags handler
-    // throws for a UIAbility main window, so only sub-windows dispatch this
-    // command (the main window's resizable attr rides the set_resize_by_drag
-    // seed below; its button bits are OS-managed with no surface at all).
+    // throws for UIAbility-kind windows (the id-0 main window and spawned
+    // UIAbility instances), so only sub-windows dispatch this command (the
+    // main window's resizable attr rides the set_resize_by_drag seed below;
+    // its button bits are OS-managed with no surface at all).
     if let Some(flags) = plan.decoration_flags {
       if let Some(window_id) = self.window_id {
         if let Some(client) = self.bridge_client("seed_creation_attrs") {
@@ -3068,10 +3065,7 @@ mod tests {
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
       .contains_key(&HELD_ID);
-    assert!(
-      !still_queued,
-      "drained seed entry not removed"
-    );
+    assert!(!still_queued, "drained seed entry not removed");
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
     drop_pending_window_ops(HELD_ID);
   }
@@ -3155,8 +3149,9 @@ mod tests {
   }
 
   /// UT for #238 (design D7): the main window never plans a
-  /// set_window_decoration_flags dispatch — the ArkTS handler throws for a
-  /// UIAbility main window, so a dispatch there is a guaranteed-fail warn.
+  /// set_window_decoration_flags dispatch — the ArkTS handler throws for
+  /// UIAbility-kind windows (the id-0 main window and spawned UIAbility
+  /// instances), so a dispatch there is a guaranteed-fail warn.
   /// The sub-window path (`is_ui_ability_window = false`, exercised by the #168 tests
   /// above) keeps the per-bit seeding.
   #[test]
@@ -3287,10 +3282,7 @@ mod tests {
       .lock()
       .expect("PENDING_WINDOW_OPS poisoned")
       .contains_key(&READY_ID);
-    assert!(
-      !queued_ops,
-      "inline dispatch must not leave a queue entry"
-    );
+    assert!(!queued_ops, "inline dispatch must not leave a queue entry");
   }
 
   // --- Issue Eulogizethesun/tauri#237 + PR#28 review T28-1/T28-4: the
@@ -3738,10 +3730,7 @@ mod tests {
       "the deferred seed did not replay after the handshake drain"
     );
     let replay_removed = queue().contains_key(&HELD_ID);
-    assert!(
-      !replay_removed,
-      "the replayed entry must be removed"
-    );
+    assert!(!replay_removed, "the replayed entry must be removed");
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
 
     // Leg 3 — degraded: the bridge never resolves. The op still runs at
