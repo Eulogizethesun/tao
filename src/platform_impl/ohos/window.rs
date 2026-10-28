@@ -735,10 +735,11 @@ struct CreationAttrPlan {
 ///
 /// #238 (design D7): on a UIAbility-kind window (`is_ui_ability_window` —
 /// the bootstrap main window AND later spawned instances) nothing rides
-/// `set_window_decoration_flags` — the ArkTS handler throws for a UIAbility
-/// main window (the buttons are OS-managed and the platform exposes no API
-/// for these enable/disable semantics; button visibility/style APIs exist,
-/// operation control does not). The decoration bits are still cached locally
+/// `set_window_decoration_flags` — the ArkTS handler throws for
+/// UIAbility-kind windows (main and spawned alike). The buttons are
+/// OS-managed and the platform exposes no API for these enable/disable
+/// semantics; button visibility/style APIs exist, operation control does
+/// not. The decoration bits are still cached locally
 /// ([`CreationAttrPlan::mirror_flags`]: the set_maximized(true)
 /// FLAG_MAXIMIZABLE guard and the set_inner_size FLAG_RESIZABLE gate read
 /// that cache), and the one attr with a real surface is `resizable`:
