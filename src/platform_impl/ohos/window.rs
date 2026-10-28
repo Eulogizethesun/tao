@@ -693,13 +693,16 @@ struct CreationAttrPlan {
   /// `set-resize-by-drag` routing ALONE, which keys on `windowId === 0` —
   /// the primary window (id 0) lands on `setResizeByDragEnabled` while every
   /// other window (spawned UIAbility instances and sub-windows, id > 0)
-  /// lands on the `enableDrag` branch. This plan therefore only selects the
-  /// SURFACE (drag leg for UIAbility-kind windows, whose
-  /// setDecorationFlags arm throws; decoration-flags leg for sub-windows)
-  /// and never re-decides the branch locally — the two ends agree by
-  /// construction instead of by duplicated classification. SubWindows plan
-  /// no drag seed — their resizable attr rides the decoration-flags leg
-  /// instead (the app-drawn resize handles).
+  /// lands on the `enableDrag` branch. This plan never re-decides the branch
+  /// locally — the two ends agree by construction instead of by duplicated
+  /// classification.
+  ///
+  /// PR#28 review gate F1: the seed is planned for EVERY window kind. A
+  /// sub-window dispatches it IN ADDITION to the decoration-flags leg,
+  /// mirroring the runtime `set_resizable` dual dispatch (before the fix a
+  /// sub-window created resizable(false) never seeded `enableDrag`, so the
+  /// edge-drag switch stayed at its OS default until a runtime
+  /// `set_resizable` call — creation and runtime diverged).
   resize_by_drag: Option<bool>,
   /// Replay `set_fullscreen` — upstream windows backend form
   /// (windows/window.rs:1338-1339): fullscreen takes precedence over
@@ -742,8 +745,11 @@ struct CreationAttrPlan {
 /// `false` seeds `set_resize_by_drag(false)` (issue
 /// Eulogizethesun/tauri#104), the same leg the runtime `set_resizable`
 /// dispatches — landing on `setResizeByDragEnabled` for window_id 0 and on
-/// the `enableDrag` sub-window branch for spawned instances (PR#28 review
-/// T28-5, unified `windowId === 0` criterion). Runtime setters on the main
+/// the `enableDrag` sub-window branch for spawned instances and sub-windows
+/// (PR#28 review T28-5, unified `windowId === 0` criterion; gate F1 extended
+/// the seed to sub-windows, so a sub-window created resizable(false) rides
+/// BOTH the decoration-flags leg and the drag leg — same shape as the
+/// runtime setter). Runtime setters on the main
 /// window error out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
 /// always passes there — "always maximizable" is the disclosed consistent
 /// reading (D7).
@@ -777,7 +783,13 @@ fn creation_attr_plan(
     } else {
       None
     },
-    resize_by_drag: if is_ui_ability_window && !attrs.resizable {
+    // #104 + PR#28 review gate F1: EVERY window kind seeds the edge-drag
+    // switch on resizable(false). For a sub-window this is the SECOND leg
+    // (alongside the decoration-flags seed above), mirroring the runtime
+    // `set_resizable` dual dispatch so creation and runtime stay isomorphic;
+    // the ArkTS branch (setResizeByDragEnabled vs enableDrag) is still
+    // decided solely by the `windowId === 0` routing (T28-5).
+    resize_by_drag: if !attrs.resizable {
       Some(false)
     } else {
       None
@@ -1295,15 +1307,16 @@ impl Window {
   /// is computed by [`creation_attr_plan`]: only attrs that differ from their
   /// default produce a command.
   fn seed_creation_attrs(&self, attrs: &window::WindowAttributes) {
-    // Issue Eulogizethesun/tauri#238 (design D7): a main window created with
-    // button-seed attrs (minimizable/maximizable/closable false) cannot honor
+    // Issue Eulogizethesun/tauri#238 (design D7): a UIAbility-kind window
+    // created with button-seed attrs (minimizable/maximizable/closable
+    // false) cannot honor
     // them — warn + ignore (a soft preference must not fail creation), while
     // the sub-window path keeps seeding the LocalStorage that drives the
     // SubWindowPage buttons.
-    let is_ui_ability_window = self.is_ui_ability_main_window();
+    let is_ui_ability_window = self.is_ui_ability_window();
     if is_ui_ability_window && (!attrs.minimizable || !attrs.maximizable || !attrs.closable) {
       log::warn!(
-        "[tao-ohos] creation attrs minimizable/maximizable/closable are ignored for the OpenHarmony main window (OS-managed decoration buttons, issue #238)"
+        "[tao-ohos] creation attrs minimizable/maximizable/closable are ignored for OpenHarmony UIAbility-kind windows (the id-0 bootstrap main window and spawned instances alike; OS-managed decoration buttons, issue #238)"
       );
     }
     let plan = creation_attr_plan(attrs, is_ui_ability_window);
@@ -1363,8 +1376,11 @@ impl Window {
     // so the seed mirrors that call shape (spawn_or_queue + the T1 deferred
     // fallback). Landing branch by the unified `windowId === 0` criterion
     // (PR#28 review T28-5): id 0 → setResizeByDragEnabled; spawned
-    // UIAbility instances (id > 0) → the enableDrag sub-window branch;
-    // SubWindows plan no drag seed (decoration-flags leg instead).
+    // UIAbility instances and sub-windows (id > 0) → the enableDrag
+    // sub-window branch. Gate F1: every kind plans this seed when
+    // resizable(false) — a sub-window rides it ALONGSIDE the
+    // decoration-flags leg (the runtime setter's dual dispatch), so the
+    // edge-drag switch is seeded at creation time too.
     if let Some(drag) = plan.resize_by_drag {
       if let Some(window_id) = self.window_id {
         if let Some(client) = self.bridge_client("seed_creation_attrs") {
@@ -1711,17 +1727,25 @@ impl Window {
     // when the bridge is not yet up (this also makes the leg observable to
     // the #237 UTs without a live client — PR#28 review T28-1).
     if !visibility {
-      if self.is_ui_ability_main_window() {
+      if self.is_ui_ability_window() {
         log::error!(
-          "[tao-ohos] set_visible(false): hiding the main window is not supported on OpenHarmony (no window-level hide API) — window {} left untouched",
+          "[tao-ohos] set_visible(false): hiding a UIAbility-kind window is not supported on OpenHarmony (no window-level hide API; covers the id-0 bootstrap main window and spawned instances) — window {} left untouched",
           window_id
         );
         return;
       }
-      // Sub-window hide intent: mirror the Minimize backfill shape
-      // ([`WindowStateMirror::apply_window_status`]) so is_visible() /
-      // is_minimized() read the hidden state until the system truth
-      // arrives. minimized=true is what the show path's restore leg reads.
+      // Sub-window hide intent: an OPTIMISTIC partial mirror — only the
+      // visible/minimized pair is written (visible=false, minimized=true) so
+      // is_visible()/is_minimized() read the hidden state until the system
+      // truth arrives (minimized=true is what the show path's restore leg
+      // reads). NOT the same shape as the Minimize backfill branch in
+      // [`WindowStateMirror::apply_window_status`]: that branch writes FOUR
+      // bits (it also clears fullscreen/maximized) because a system
+      // windowStatusChange Minimize event IS system truth about the whole
+      // window state, while this hide dispatch (the d.ts dual-semantics
+      // minimize() used as a hide primitive) carries no fullscreen/maximized
+      // observation — the two bits stay at their previously recorded intent
+      // until a real windowStatusChange backfills them.
       self.mirror.minimized.store(true, Ordering::Release);
       self.mirror.visible.store(false, Ordering::Release);
       self.spawn_or_queue_deferred("set_visible", move |client| async move {
@@ -1878,15 +1902,15 @@ impl Window {
 
   // TODO(issue 4 residual, partially addressed): set_minimizable/set_maximizable/
   // set_closable only control decoration button visibility (the
-  // SubWindowPage @LocalStorageProp) and do not block the programmatic APIs; the main window
-  // errors out for them (issue Eulogizethesun/tauri#238 — the buttons are
-  // OS-managed). set_resizable is the exception since issue
+  // SubWindowPage @LocalStorageProp) and do not block the programmatic APIs; a
+  // UIAbility-kind window errors out for them (issue Eulogizethesun/tauri#238
+  // — the buttons are OS-managed). set_resizable is the exception since issue
   // Eulogizethesun/tauri#104 — see below (it stays ungated: it has a real
   // main-window surface in set_resize_by_drag). is_resizable etc. read from
-  // the local mirror for sub-windows; main-window button queries report the
-  // OS-managed truth (#238). See doc/OHOS-window-residual-issues.md (issue 4).
+  // the local mirror for sub-windows; UIAbility-kind button queries report
+  // the OS-managed truth (#238). See doc/OHOS-window-residual-issues.md (issue 4).
   pub fn set_resizable(&self, resizable: bool) {
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       // PR#28 review T28-2: the ArkTS setDecorationFlags handler throws for
       // EVERY UIAbility-kind window (the bootstrap main window and spawned
       // instances alike — the same gate creation time already dropped the
@@ -1931,13 +1955,21 @@ impl Window {
     }
   }
 
-  /// Whether this window's decoration buttons are OS-managed (issue
-  /// Eulogizethesun/tauri#238): every UIAbility-container window (the
-  /// bootstrap main window AND later spawned UIAbility instances — both get
-  /// system-provided decorations, with no API mapping to the per-button
-  /// enable/disable flag semantics). Matches the
-  /// ArkTS `isUIAbilityMainWindow` gate, which throws for the same reason.
-  fn is_ui_ability_main_window(&self) -> bool {
+  /// Whether this window is of the UIAbility KIND (issue
+  /// Eulogizethesun/tauri#238): the id-0 bootstrap main window AND later
+  /// spawned UIAbility instances — both get system-provided decorations, with
+  /// no API mapping to the per-button enable/disable flag semantics, and
+  /// both reject the UIAbility-hostile ops (decoration-flags dispatch,
+  /// window-level hide). PR#28 review gate F7: renamed from
+  /// `is_ui_ability_main_window` — the predicate is KIND-based, not
+  /// id-based, and "main window" understated its reach: a spawned UIAbility
+  /// instance (id > 0) takes every branch gated here too. The gate must NOT
+  /// be narrowed to `window_id == Some(0)`: a spawned instance falling
+  /// through to the sub-window branches would dispatch the guaranteed-throw
+  /// setDecorationFlags (T28-2) and route a hide onto a task-bar minimize.
+  /// Matches the ArkTS `isUIAbilityMainWindow` gate, which throws for the
+  /// same reason.
+  fn is_ui_ability_window(&self) -> bool {
     matches!(self.kind, OHOSWindowKind::UIAbility)
   }
 
@@ -1950,9 +1982,9 @@ impl Window {
     // bit was never consulted for UIAbility windows anyway). Honest no-op
     // here (tao stays void, upstream-aligned); the user-visible Err surfaces
     // at the tauri-runtime-wry dispatcher. Sub-windows keep the real behavior.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       log::error!(
-        "[tao-ohos] set_minimizable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        "[tao-ohos] set_minimizable({}): not supported on OpenHarmony for UIAbility-kind windows (the id-0 bootstrap main window and spawned instances; OS-managed decoration buttons) — ignored for window {:?}",
         minimizable,
         self.window_id
       );
@@ -1963,9 +1995,9 @@ impl Window {
 
   pub fn set_maximizable(&self, maximizable: bool) {
     // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       log::error!(
-        "[tao-ohos] set_maximizable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        "[tao-ohos] set_maximizable({}): not supported on OpenHarmony for UIAbility-kind windows (the id-0 bootstrap main window and spawned instances; OS-managed decoration buttons) — ignored for window {:?}",
         maximizable,
         self.window_id
       );
@@ -1976,9 +2008,9 @@ impl Window {
 
   pub fn set_closable(&self, closable: bool) {
     // Issue Eulogizethesun/tauri#238 — see set_minimizable for the rationale.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       log::error!(
-        "[tao-ohos] set_closable({}): not supported on OpenHarmony for the main window (OS-managed decoration buttons) — ignored for window {:?}",
+        "[tao-ohos] set_closable({}): not supported on OpenHarmony for UIAbility-kind windows (the id-0 bootstrap main window and spawned instances; OS-managed decoration buttons) — ignored for window {:?}",
         closable,
         self.window_id
       );
@@ -2293,14 +2325,15 @@ impl Window {
   }
 
   pub fn is_minimizable(&self) -> bool {
-    // Issue Eulogizethesun/tauri#238: the main window's buttons are OS-managed
+    // Issue Eulogizethesun/tauri#238: a UIAbility-kind window's buttons are
+    // OS-managed
     // and always available — report the true state instead of the local bit
     // (which no longer tracks anything for UIAbility windows since the
     // setters error out). Known edge (documented in the tauri rustdoc too):
     // set_decorations(false)/setWindowDecorVisible hides the WHOLE bar; these
     // queries still report true — same as upstream Win32, where the
     // WS_MINIMIZEBOX-style styles stay independent of the visible chrome.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       return true;
     }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_MINIMIZABLE != 0
@@ -2308,7 +2341,7 @@ impl Window {
 
   pub fn is_maximizable(&self) -> bool {
     // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       return true;
     }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_MAXIMIZABLE != 0
@@ -2316,7 +2349,7 @@ impl Window {
 
   pub fn is_closable(&self) -> bool {
     // Issue Eulogizethesun/tauri#238 — see is_minimizable for the rationale.
-    if self.is_ui_ability_main_window() {
+    if self.is_ui_ability_window() {
       return true;
     }
     self.decoration_flags.load(Ordering::Acquire) & FLAG_CLOSABLE != 0
@@ -3029,11 +3062,14 @@ mod tests {
     openharmony_ability::register_ui_ability_stage(HELD_ID);
     drain_ready_pending_window_ops();
     assert!(ran.load(Ordering::SeqCst), "held seed not replayed");
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    let still_queued = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .contains_key(&HELD_ID);
     assert!(
-      !PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .contains_key(&HELD_ID),
+      !still_queued,
       "drained seed entry not removed"
     );
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
@@ -3046,6 +3082,8 @@ mod tests {
   /// downstream: set_maximized(true)'s guard reads FLAG_MAXIMIZABLE).
   /// Sub-window leg (`is_ui_ability_window = false`) — the dispatch and the local mirror
   /// stay coupled there; the main window diverges (see the #238 test below).
+  /// Gate F1: a sub-window resizable(false) additionally plans the
+  /// set_resize_by_drag(false) seed (the runtime setter's dual dispatch).
   #[test]
   fn ut_creation_plan_seeds_decoration_flags_when_attrs_differ() {
     let mut attrs = window::WindowAttributes::default();
@@ -3055,6 +3093,11 @@ mod tests {
       plan.decoration_flags,
       Some(FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE),
       "resizable(false) must seed flags with only the resizable bit cleared"
+    );
+    assert_eq!(
+      plan.resize_by_drag,
+      Some(false),
+      "resizable(false) must ALSO plan the set_resize_by_drag(false) seed (gate F1: creation mirrors the runtime dual dispatch)"
     );
 
     let mut attrs = window::WindowAttributes::default();
@@ -3131,7 +3174,12 @@ mod tests {
     // 3. resizable(true) (the default) on the main window plans no resize
     //    seed — default attrs produce zero traffic.
     // 4. The same button attrs on a sub window (is_ui_ability_window = false) keep
-    //    today's per-bit seed and its coupled mirror (no behavior change).
+    //    today's per-bit seed and its coupled mirror (no behavior change);
+    //    with the default resizable(true) no drag seed is planned either.
+    // 5. Gate F1: a sub window created resizable(false) plans BOTH legs —
+    //    the decoration bit (SubWindowPage LocalStorage) AND the
+    //    set_resize_by_drag(false) edge-drag seed, mirroring the runtime
+    //    set_resizable dual dispatch.
     let mut attrs = window::WindowAttributes::default();
     attrs.minimizable = false;
     attrs.maximizable = false;
@@ -3192,7 +3240,22 @@ mod tests {
     );
     assert!(
       plan.resize_by_drag.is_none(),
-      "sub-windows keep the decoration-flags resizable leg, no resize_by_drag seed"
+      "sub-windows keep the decoration-flags resizable leg, no resize_by_drag seed for button attrs"
+    );
+
+    // Gate F1 arm: a sub window created resizable(false) plans BOTH legs.
+    let mut attrs = window::WindowAttributes::default();
+    attrs.resizable = false;
+    let plan = creation_attr_plan(&attrs, false);
+    assert_eq!(
+      plan.decoration_flags,
+      Some(FLAG_ALL_DECORATIONS & !FLAG_RESIZABLE),
+      "sub-window resizable(false) keeps the decoration-flags leg (SubWindowPage LocalStorage)"
+    );
+    assert_eq!(
+      plan.resize_by_drag,
+      Some(false),
+      "sub-window resizable(false) must ALSO plan the set_resize_by_drag(false) seed (gate F1: creation mirrors the runtime dual dispatch)"
     );
   }
 
@@ -3218,11 +3281,14 @@ mod tests {
       ran.load(Ordering::SeqCst),
       "ready-window seed must dispatch inline"
     );
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    let queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .contains_key(&READY_ID);
     assert!(
-      !PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .contains_key(&READY_ID),
+      !queued_ops,
       "inline dispatch must not leave a queue entry"
     );
   }
@@ -3282,12 +3348,17 @@ mod tests {
       !mirror.visible.load(Ordering::Acquire),
       "sub-window hide must flip the visible intent bit off (is_visible honesty)"
     );
+    // Gate F9 (test hygiene): the queue state is bound to a local FIRST so
+    // the mutex guard is released before the assert — a panic inside the
+    // assert must not poison PENDING_WINDOW_OPS and cascade into unrelated
+    // UTs (the F8 fixwave mutation run hit exactly that).
+    let queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&HIDING_ID)
+      .map(|ops| ops.len());
     assert_eq!(
-      PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .get(&HIDING_ID)
-        .map(|ops| ops.len()),
+      queued_ops,
       Some(1),
       "sub-window set_visible(false) must queue the minimize (hide) dispatch — observable even with window_client: None (T28-1)"
     );
@@ -3339,11 +3410,14 @@ mod tests {
       mirror.visible.load(Ordering::Acquire),
       "a refused main-window hide leaves the window untouched — is_visible stays true"
     );
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — see the paired sub-window UT above.
+    let queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .contains_key(&HIDING_ID);
     assert!(
-      !PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .contains_key(&HIDING_ID),
+      !queued_ops,
       "main-window set_visible(false) must not queue any window op"
     );
     openharmony_ability::unregister_pending_ui_ability(HIDING_ID);
@@ -3392,12 +3466,15 @@ mod tests {
       !mirror.minimized.load(Ordering::Acquire),
       "show on a non-minimized window must not write the minimized mirror (show-only leg)"
     );
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — see the paired hide UT above.
+    let queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&SHOWING_ID)
+      .map(|ops| ops.len());
     assert_eq!(
-      PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .get(&SHOWING_ID)
-        .map(|ops| ops.len()),
+      queued_ops,
       Some(1),
       "sub-window set_visible(true) must queue the show dispatch even with window_client: None (T1 deferred leg)"
     );
@@ -3456,12 +3533,15 @@ mod tests {
       0,
       "the local FLAG_RESIZABLE mirror bit must clear on a UIAbility window (the set_inner_size gate reads it)"
     );
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    let main_queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&MAIN_ID)
+      .map(|ops| ops.len());
     assert_eq!(
-      PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .get(&MAIN_ID)
-        .map(|ops| ops.len()),
+      main_queued_ops,
       Some(1),
       "a UIAbility window must queue EXACTLY the drag leg — a decoration dispatch would queue a second op (T28-2)"
     );
@@ -3470,12 +3550,13 @@ mod tests {
     // for the SubWindowPage LocalStorage + the drag leg) — two queued ops.
     let sub = make_window(SUB_ID, OHOSWindowKind::SubWindow);
     sub.set_resizable(false);
+    let sub_queued_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&SUB_ID)
+      .map(|ops| ops.len());
     assert_eq!(
-      PENDING_WINDOW_OPS
-        .lock()
-        .expect("PENDING_WINDOW_OPS poisoned")
-        .get(&SUB_ID)
-        .map(|ops| ops.len()),
+      sub_queued_ops,
       Some(2),
       "a sub-window keeps the dual dispatch (decoration bit + drag leg), both via the deferred legs"
     );
@@ -3484,6 +3565,87 @@ mod tests {
     openharmony_ability::unregister_pending_ui_ability(SUB_ID);
     drop_pending_window_ops(MAIN_ID);
     drop_pending_window_ops(SUB_ID);
+  }
+
+  /// UT for PR#28 review gate F1: a SUB-window created with resizable(false)
+  /// seeds BOTH legs — the decoration-flags bit (SubWindowPage LocalStorage)
+  /// AND the set_resize_by_drag(false) edge-drag seed — mirroring the runtime
+  /// set_resizable dual dispatch (creation/runtime isomorphism). On the
+  /// pre-fix plan the drag seed was only planned for UIAbility-kind windows,
+  /// so the sub-window creation leg queued ONE op and the first assert fails
+  /// (a single decoration dispatch); the default-attrs arm locks the zero
+  /// baseline (the 2 ops are the two legs, not stray traffic). Sentinel id +
+  /// pending registration + window_client: None, same dispatch-observable
+  /// discipline as the T28-1 UTs; the ArkTS branch landing stays the
+  /// `windowId === 0` routing (T28-5) — enableDrag for this id > 0 window.
+  #[test]
+  fn ut_creation_seed_sub_window_resizable_false_queues_both_legs() {
+    const SEED_ID: i64 = i64::MAX - 36;
+    const DEFAULT_ID: i64 = i64::MAX - 37;
+    // Idempotent reset so a previously failed run cannot leak registry state
+    // that would pin these ids as "not ready" or hold stale ops.
+    openharmony_ability::unregister_pending_ui_ability(SEED_ID);
+    openharmony_ability::unregister_pending_ui_ability(DEFAULT_ID);
+    drop_pending_window_ops(SEED_ID);
+    drop_pending_window_ops(DEFAULT_ID);
+    openharmony_ability::register_pending_ui_ability(SEED_ID);
+    openharmony_ability::register_pending_ui_ability(DEFAULT_ID);
+    assert!(!openharmony_ability::is_window_ready(SEED_ID));
+
+    let make_window = |id: i64| Window {
+      app: OpenHarmonyApp::new(),
+      window_id: Some(id),
+      kind: OHOSWindowKind::SubWindow,
+      window_client: std::sync::Mutex::new(None),
+      bridge_refetch_warned: AtomicBool::new(false),
+      runtime: BridgeExecutor::new(),
+      mirror: Arc::new(WindowStateMirror::new(true)),
+      decorations: AtomicBool::new(true),
+      transparent: false,
+      always_on_top: AtomicBool::new(false),
+      decoration_flags: AtomicU8::new(FLAG_ALL_DECORATIONS),
+      min_inner_width: AtomicU32::new(0),
+      min_inner_height: AtomicU32::new(0),
+      max_inner_width: AtomicU32::new(0),
+      max_inner_height: AtomicU32::new(0),
+    };
+
+    // Leg 1: sub window created resizable(false) -> decoration-flags seed +
+    // drag seed, two queued ops.
+    let window = make_window(SEED_ID);
+    let mut attrs = window::WindowAttributes::default();
+    attrs.resizable = false;
+    window.seed_creation_attrs(&attrs);
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — a panic here must not poison PENDING_WINDOW_OPS.
+    let seeded_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&SEED_ID)
+      .map(|ops| ops.len());
+    assert_eq!(
+      seeded_ops,
+      Some(2),
+      "a sub-window created resizable(false) must queue BOTH seeds: the decoration-flags leg AND the set_resize_by_drag(false) drag seed (gate F1 creation/runtime isomorphism)"
+    );
+
+    // Leg 2: default attrs (resizable(true)) -> zero seeds.
+    let default_window = make_window(DEFAULT_ID);
+    default_window.seed_creation_attrs(&window::WindowAttributes::default());
+    let default_ops = PENDING_WINDOW_OPS
+      .lock()
+      .expect("PENDING_WINDOW_OPS poisoned")
+      .get(&DEFAULT_ID)
+      .map(|ops| ops.len());
+    assert_eq!(
+      default_ops, None,
+      "default attrs must plan zero seeds (the two ops above are the two legs, not stray traffic)"
+    );
+
+    openharmony_ability::unregister_pending_ui_ability(SEED_ID);
+    openharmony_ability::unregister_pending_ui_ability(DEFAULT_ID);
+    drop_pending_window_ops(SEED_ID);
+    drop_pending_window_ops(DEFAULT_ID);
   }
 
   // --- PR review fix T1: the deferred-client seed leg. The eager
@@ -3550,8 +3712,13 @@ mod tests {
       !replayed.load(Ordering::SeqCst),
       "the deferred seed must not run while the handshake is pending"
     );
+    // Gate F9 (test hygiene): bind before assert, guard released on the
+    // semicolon — a panic here must not poison PENDING_WINDOW_OPS (the
+    // assert-holding-guard shape cascaded a F8 mutation failure into
+    // unrelated UTs).
+    let held_ops = queue().get(&HELD_ID).map(|ops| ops.len());
     assert_eq!(
-      queue().get(&HELD_ID).map(|ops| ops.len()),
+      held_ops,
       Some(1),
       "the deferred seed must be held while the handshake is pending"
     );
@@ -3570,8 +3737,9 @@ mod tests {
       replayed.load(Ordering::SeqCst),
       "the deferred seed did not replay after the handshake drain"
     );
+    let replay_removed = queue().contains_key(&HELD_ID);
     assert!(
-      !queue().contains_key(&HELD_ID),
+      !replay_removed,
       "the replayed entry must be removed"
     );
     openharmony_ability::unregister_pending_ui_ability(HELD_ID);
@@ -3591,8 +3759,9 @@ mod tests {
     );
     openharmony_ability::register_ui_ability_stage(DEGRADED_ID);
     drain_ready_pending_window_ops();
+    let degraded_stranded = queue().contains_key(&DEGRADED_ID);
     assert!(
-      !queue().contains_key(&DEGRADED_ID),
+      !degraded_stranded,
       "the degraded leg must not strand its queue entry"
     );
     openharmony_ability::unregister_pending_ui_ability(DEGRADED_ID);
