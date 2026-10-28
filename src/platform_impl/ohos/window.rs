@@ -2711,9 +2711,10 @@ impl Window {
     self.window_id
   }
 
-  /// Resolved window kind (issue Eulogizethesun/tauri#238) — surfaced through
+  /// Resolved window kind (issue Eulogizethesun/tauri#238), surfaced through
   /// `WindowExtOpenHarmony::window_kind` for the embedding runtime's
-  /// main-window-only dispatcher gates.
+  /// UIAbility-kind-window dispatcher gates (the bootstrap main window and
+  /// spawned instances).
   pub fn kind(&self) -> OHOSWindowKind {
     self.kind
   }

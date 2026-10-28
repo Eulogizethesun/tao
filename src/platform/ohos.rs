@@ -52,8 +52,8 @@ pub trait WindowExtOpenHarmony {
   /// and spawned UIAbility instances), `SubWindow` for sub-windows created
   /// via `windowStage.createSubWindow` (issue Eulogizethesun/tauri#240).
   /// Consumed by the embedding runtime (tauri-runtime-wry) to capture
-  /// `is_ui_ability_main` and gate main-window-only operations at the
-  /// dispatcher layer.
+  /// `is_ui_ability_main` and gate UIAbility-kind-window operations (the
+  /// bootstrap main window and spawned instances) at the dispatcher layer.
   fn window_kind(&self) -> OHOSWindowKind;
 
   /// Returns the `BridgeRuntime` for constructing bridge-based facade clients
