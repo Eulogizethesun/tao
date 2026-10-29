@@ -551,8 +551,8 @@ impl WindowBuilder {
   ///
   /// - **OpenHarmony:** Ignored at creation time - the platform backend does
   ///   not consume a window icon during window creation (committer #168);
-  ///   there is no runtime `set_window_icon` on OHOS either, so the icon has
-  ///   no effect for the lifetime of the window.
+  ///   the runtime `set_window_icon` on OHOS is a silent no-op (no dispatch),
+  ///   so the icon has no effect for the lifetime of the window.
   ///
   /// [`Window::set_window_icon`]: crate::window::Window::set_window_icon
   #[inline]

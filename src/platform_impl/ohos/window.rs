@@ -1775,8 +1775,10 @@ impl Window {
     // WindowManager.ets showWindowMethod guard documents the hazard). A plain
     // visible window gets show-only (a raise), never touching its maximize
     // state. The mirror is cleared only on the restore leg, matching the
-    // restore intent (API12: restore is unavailable -> show_window best-effort,
-    // the structured warn below still fires).
+    // restore intent (restore() is @since 14 -- a single d.ts block,
+    // main-window only; below 14, e.g. API-12 deployment baselines, and on
+    // sub-windows it is unavailable -> show_window best-effort, the
+    // structured warn below still fires).
     let minimized = self.mirror.minimized.load(Ordering::Acquire);
     // Show intent (T28-4 mirror contract): pairs with the hide intent write
     // in the false leg -- is_visible() must not stay false after the window
