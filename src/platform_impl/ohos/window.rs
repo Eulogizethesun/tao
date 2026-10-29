@@ -1914,7 +1914,7 @@ impl Window {
   // -- the buttons are OS-managed). set_resizable is the exception since issue
   // Eulogizethesun/tauri#104 -- see below (it stays ungated: it has a real
   // UIAbility-kind surface in set_resize_by_drag (main id-0 and spawned
-  // instances alike). is_resizable etc. read from the local mirror for
+  // instances alike)). is_resizable etc. read from the local mirror for
   // sub-windows; UIAbility-kind button queries report
   // the OS-managed truth (#238). See doc/OHOS窗口遗留问题.md in the tauri repo (issue 4).
   pub fn set_resizable(&self, resizable: bool) {
@@ -3171,16 +3171,16 @@ mod tests {
   #[test]
   fn ut_creation_plan_main_window_no_decoration_dispatch_resize_drag_seed() {
     // Brief:
-    // 1. Main-window attrs with all three button bits false must plan NO
+    // 1. UIAbility-kind-window attrs with all three button bits false must plan NO
     //    decoration dispatch and leave the mirror at the all-ones default
     //    (OS-managed buttons -- warn+ignore at the call site).
-    // 2. resizable(false) on the main window must NOT plan a decoration
+    // 2. resizable(false) on a UIAbility-kind window must NOT plan a decoration
     //    dispatch (guaranteed ArkTS throw) -- instead it plans the
     //    set_resize_by_drag(false) seed leg (#104) while the mirror keeps
     //    ONLY the resizable bit cleared (the programmatic-resize gate in
     //    set_inner_size reads that cache; the D7 disclosure keeps the
     //    set_maximized guard passing).
-    // 3. resizable(true) (the default) on the main window plans no resize
+    // 3. resizable(true) (the default) on a UIAbility-kind window plans no resize
     //    seed -- default attrs produce zero traffic.
     // 4. The same button attrs on a sub window (is_ui_ability_window = false) keep
     //    today's per-bit seed and its coupled mirror (no behavior change);
@@ -3496,7 +3496,7 @@ mod tests {
   /// the queue must hold EXACTLY ONE op -- the edge-drag leg (whose branch
   /// landing is the ArkTS `windowId === 0` routing, T28-5). A decoration
   /// dispatch would enter a second op. The paired sub-window arm locks the
-  /// dual dispatch (decoration bit + drag leg = two ops) that the main window
+  /// dual dispatch (decoration bit + drag leg = two ops) that a UIAbility-kind window
   /// must not have. Discriminating power (T28-1 discipline): on the pre-fix
   /// code both legs were eager `bridge_client` reads that dropped with
   /// `window_client: None`, so the queue stayed EMPTY and the length
