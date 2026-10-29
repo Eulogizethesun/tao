@@ -1683,7 +1683,7 @@ impl Window {
   }
 
   pub fn set_title(&self, title: &str) {
-    // OHOS setWindowTitle (API 9+, callback form). Main window + sub-windows
+    // OHOS setWindowTitle (API 15, Promise form). Main window + sub-windows
     // both support title text. Only visible when decorations enabled (decorEnabled=true).
     // Icon is NOT changeable at runtime.
     if let Some(window_id) = self.window_id {
@@ -1728,7 +1728,7 @@ impl Window {
     //
     // On a SUB-window the d.ts dual semantics make `minimize()` THE hide
     // primitive: it hides the window and `showWindow()` restores it
-    // (minimize @since 12, showWindow @since 11) -- the blanket no-op
+    // (minimize @since 11, showWindow @since 9) -- the blanket no-op
     // regressed every sub-window hide caller (the old behavior is
     // restored). The dispatch rides the T1 deferred leg: queued while
     // the creation handshake is pending, and re-resolving the client at
@@ -1822,7 +1822,7 @@ impl Window {
       });
       // The main window (window_id = 0) is dispatched too — the ArkTS side
       // routes by kind (issue Eulogizethesun/tauri#105): main window uses
-      // window.shiftAppWindowFocus (12+, works for main/sub windows), and the
+      // window.shiftAppWindowFocus (11+, works for main/sub windows), and the
       // sub-windows keep raiseToAppTop (14+, subwindow-only by contract).
     }
   }
@@ -2137,8 +2137,10 @@ impl Window {
               );
             }
           } else {
-            // recover() switches MAXIMIZE/FULL_SCREEN -> FLOATING (API7+,
-            // public)
+            // recover() switches MAXIMIZE/FULL_SCREEN -> FLOATING (public).
+            // Versions, kept separate: recover is @since 11 (d.ts first
+            // block); the FLOATING-restore semantics is the API 12 doc
+            // revision, not the introduction version.
             if let Err(e) = client.recover_window(window_id).await {
               log::warn!(
                 "[tao-ohos] recover_window failed for window {}: {:?}",
