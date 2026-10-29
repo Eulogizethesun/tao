@@ -1130,9 +1130,10 @@ impl Window {
       }
     }
 
-    // Apply decorations immediately for the main window at creation time.
-    // Without this, the main window retains its default OS decorations even if
-    // the builder specified .decorations(false), because Window::set_decorations()
+    // Apply decorations immediately for UIAbility-kind windows at creation
+    // time (the id-0 main window and spawned instances alike). Without this,
+    // a UIAbility-kind window retains its default OS decorations even if the
+    // builder specified .decorations(false), because Window::set_decorations()
     // is only called later (if at all) by the user.
     // window_id (not hardcoded 0): a subsequent UIAbility window with
     // decorations(false) must not strip the primary window's decorations.
@@ -1321,8 +1322,8 @@ impl Window {
     // Local mirror first: set_maximized's guard reads FLAG_MAXIMIZABLE and
     // set_inner_size's gate reads FLAG_RESIZABLE from this cache, so the
     // cache must be in place before the replay half. Decoupled from the
-    // dispatch below (#238): a main window caches its attr bits (the
-    // resizable clear included) without any decoration dispatch.
+    // dispatch below (#238): UIAbility-kind windows cache their attr bits
+    // (the resizable clear included) without any decoration dispatch.
     if plan.mirror_flags != FLAG_ALL_DECORATIONS {
       self
         .decoration_flags
@@ -1331,8 +1332,8 @@ impl Window {
     // Sub-window decoration seed: #238 -- the ArkTS setDecorationFlags handler
     // throws for UIAbility-kind windows (the id-0 main window and spawned
     // UIAbility instances), so only sub-windows dispatch this command (the
-    // main window's resizable attr rides the set_resize_by_drag seed below;
-    // its button bits are OS-managed with no surface at all).
+    // UIAbility-kind windows' resizable attr rides the set_resize_by_drag
+    // seed below; their button bits are OS-managed with no surface at all).
     if let Some(flags) = plan.decoration_flags {
       if let Some(window_id) = self.window_id {
         if let Some(client) = self.bridge_client("seed_creation_attrs") {

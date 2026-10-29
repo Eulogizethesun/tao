@@ -777,8 +777,9 @@ impl Window {
   ///   window in the screen space coordinate system.
   /// - **Android / Linux(Wayland):** Unsupported.
   /// - **OpenHarmony:** The dispatch chain runs unconditionally - `move_window_to` forwards to
-  ///   `window.Window.moveWindowTo(x, y)` for both the main UIAbility window (window_id = 0)
-  ///   and sub-windows (see `doc/ohos-window-test-mapping.md`). Two caveats: the resize
+  ///   `window.Window.moveWindowTo(x, y)` for the id-0 main UIAbility window (window_id = 0),
+  ///   sub-windows, and spawned UIAbility instances alike (see
+  ///   `doc/ohos-window-test-mapping.md` in the tauri repo). Two caveats: the resize
   ///   path is clamped by the system WM (freeform windows), and for the main window the move
   ///   itself is dispatched but the resulting geometry is not reliably readable back from JS
   ///   (`outer_position()` reads the `window_rect` callback, which a pure move does not
@@ -814,9 +815,14 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `resize_window` forwards to
-  ///   `window.Window.resize(w, h)` with exact decor compensation, for both the main UIAbility
-  ///   window (window_id = 0) and sub-windows (see `doc/ohos-window-test-mapping.md`).
+  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `set_inner_size` sends
+  ///   `resize_inner_window` (bridge action "resize-inner"), whose ArkTS handler measures the
+  ///   system decor first (chrome = outer windowRect - drawableRect per axis, from one atomic
+  ///   `getWindowProperties()` snapshot) and then resizes to w + chrome / h + chrome, for the
+  ///   id-0 main UIAbility window (window_id = 0), sub-windows, and spawned UIAbility instances
+  ///   alike (see `doc/ohos-window-test-mapping.md` in the tauri repo). The decor compensation
+  ///   belongs to the resize-inner action: the plugin facade's `resize_window` command maps to
+  ///   the bare "resize" action, which resizes without compensation.
   ///   The resize takes effect but the applied size is clamped by the system WM (freeform
   ///   windows), so the result may differ from the requested value. Error 1300002 ("window
   ///   state is abnormal") only appears transiently when the window is in an abnormal state -
@@ -931,11 +937,12 @@ impl Window {
   /// - **macOS**: If the window is already focused, it is not possible to unfocus it after calling `set_focusable(false)`.
   ///   In this case, you might consider calling [`Window::set_focus`] but it will move the window to the back i.e. at the bottom in terms of z-order.
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony**: Forwarded to the window manager for the main window
-  ///   and sub-windows alike; success or rejection is arbitrated by the
-  ///   system (device arbitration 2026-10-21: the main window path is
-  ///   dispatched, not silently no-op'd - a rejection surfaces as a warning
-  ///   log carrying the window id and the platform error).
+  /// - **OpenHarmony**: Forwarded to the window manager for the id-0 main
+  ///   window, sub-windows, and spawned UIAbility instances alike; success
+  ///   or rejection is arbitrated by the system (device arbitration
+  ///   2026-10-21: the main window path is dispatched, not silently no-op'd
+  ///   - a rejection surfaces as a warning log carrying the window id and
+  ///   the platform error).
   #[inline]
   pub fn set_focusable(&self, focusable: bool) {
     self.window.set_focusable(focusable)

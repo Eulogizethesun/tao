@@ -197,8 +197,10 @@ pub enum NativeKeyCode {
   /// This is the android "key code" of the event as returned by
   /// `KeyEvent.getKeyCode()`
   Android(i32),
-  /// The OpenHarmony key code of the event as returned by
-  /// `Keyboard_NonImeKeyEventCallback`.
+  /// The OpenHarmony key code of the event as delivered by the XComponent
+  /// key-event path (`OH_NativeXComponent_KeyCode`; the device-observed
+  /// values match the `OH_NativeXComponent_KeyCode_KEY_*` constants, e.g.
+  /// 2012/2013 for KEY_DPAD_UP/KEY_DPAD_DOWN).
   Ohos(i32),
 }
 
