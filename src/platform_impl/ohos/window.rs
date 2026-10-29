@@ -1728,12 +1728,13 @@ impl Window {
     //
     // On a SUB-window the d.ts dual semantics make `minimize()` THE hide
     // primitive: it hides the window and `showWindow()` restores it
-    // (@since 12) -- the blanket no-op regressed every sub-window hide
-    // caller (the old behavior is restored). The dispatch rides the T1
-    // deferred leg: queued while the creation handshake is pending, and
-    // re-resolving the client at execution time instead of being dropped
-    // when the bridge is not yet up (this also makes the leg observable to
-    // the #237 UTs without a live client -- PR#28 review T28-1).
+    // (minimize @since 12, showWindow @since 11) -- the blanket no-op
+    // regressed every sub-window hide caller (the old behavior is
+    // restored). The dispatch rides the T1 deferred leg: queued while
+    // the creation handshake is pending, and re-resolving the client at
+    // execution time instead of being dropped when the bridge is not yet
+    // up (this also makes the leg observable to the #237 UTs without a
+    // live client -- PR#28 review T28-1).
     if !visibility {
       if self.is_ui_ability_window() {
         log::error!(
@@ -1821,7 +1822,7 @@ impl Window {
       });
       // The main window (window_id = 0) is dispatched too — the ArkTS side
       // routes by kind (issue Eulogizethesun/tauri#105): main window uses
-      // window.shiftAppWindowFocus (11+, works for main/sub windows), and the
+      // window.shiftAppWindowFocus (12+, works for main/sub windows), and the
       // sub-windows keep raiseToAppTop (14+, subwindow-only by contract).
     }
   }
@@ -2265,8 +2266,8 @@ impl Window {
     // Records intent (is_always_on_top reads this) AND dispatches to OHOS
     // setWindowTopmost (API 14+, needs ohos.permission.WINDOW_TOPMOST) via the
     // window bridge facade. Main window only per OHOS docs; sub-windows
-    // will error (caught + warned in ArkTS, non-fatal). Only effective in
-    // freeform window mode.
+    // will error (ArkTS throws; tao catches and warns, non-fatal). Only
+    // effective in freeform window mode.
     self.always_on_top.store(always_on_top, Ordering::Release);
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_always_on_top") else {
@@ -2339,7 +2340,7 @@ impl Window {
     // OS-managed
     // and always available -- report the true state instead of the local bit
     // (which no longer tracks anything for UIAbility windows since the
-    // setters error out). Known edge (documented in the tauri rustdoc too):
+    // setters error out). Known edge (no upstream doc; recorded here only):
     // set_decorations(false)/setWindowDecorVisible hides the WHOLE bar; these
     // queries still report true -- same as upstream Win32, where the
     // WS_MINIMIZEBOX-style styles stay independent of the visible chrome.

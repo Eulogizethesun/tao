@@ -1238,7 +1238,7 @@ impl Window {
   /// - **OpenHarmony:** Records the intent bit and dispatches `setWindowTopmost`
   ///   (API 14+, requires `ohos.permission.WINDOW_TOPMOST`); only effective for
   ///   freeform windows - the main (UIAbility) window is the supported form, and
-  ///   Sub-windows error out (caught + warned in ArkTS, non-fatal).
+  ///   Sub-windows error out (ArkTS throws; tao catches and warns, non-fatal).
   // TODO: Unsupported in gtk4
   #[inline]
   pub fn set_always_on_top(&self, always_on_top: bool) {
