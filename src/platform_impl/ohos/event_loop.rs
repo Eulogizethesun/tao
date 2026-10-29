@@ -47,17 +47,25 @@ const EFFECTIVE_THEME_UNSEEDED: u8 = 2;
 static LAST_EFFECTIVE_THEME: AtomicU8 = AtomicU8::new(EFFECTIVE_THEME_UNSEEDED);
 
 /// #180(a) (design D7): the window id currently recorded as focused -- the
-/// shared change-edge snapshot for BOTH focus sources (SubWindowPage
+/// shared change-edge snapshot read by both focus sources (SubWindowPage
 /// `windowEvent` WINDOW_ACTIVE/WINDOW_INACTIVE edges drained via
-/// `drain_pending_window_focus`, and the per-UIAbility stage
-/// GainedFocus/LostFocus arms). 0 = none. The edge rules built on it:
-/// a gain edge (focused=true, last!=W) pairs-clears the previous holder
-/// before the gain; a loss edge only applies when W is the recorded holder;
-/// same-state duplicate edges are swallowed (zero WindowEvents). Written by
-/// `handle_gained_focus` (gain -> window id) and the stage LostFocus arm
-/// (loss -> 0) so cross-path duplicate edges dedup the same way. Read and
-/// written from the single-threaded run_loop dispatch only -- Relaxed matches
-/// the HAS_FOCUS discipline.
+/// `openharmony_ability::drain_pending_window_focus`, and the per-UIAbility
+/// stage GainedFocus/LostFocus arms). 0 = none. Scope note (review R20): the
+/// edge rules built on this snapshot -- a gain edge (focused=true, last!=W)
+/// pairs-clears the previous holder before the gain, a loss edge only
+/// applies when W is the recorded holder, and same-state duplicate edges are
+/// swallowed (zero WindowEvents) -- are implemented by the DRAIN path only
+/// (`EventLoop::handle_pending_window_focus`, invoked from the run_loop's
+/// drained-focus loop). The stage arms only WRITE the snapshot so
+/// cross-path duplicate edges dedup against the same record
+/// (`EventLoop::handle_gained_focus` stores gain -> window id; the stage
+/// LostFocus arm stores loss -> 0), and their semantics are asymmetric with
+/// those rules: a duplicate stage GainedFocus re-dispatches `Focused(true)`
+/// (no same-state swallow), a stage gain over a drain-focused holder does
+/// NOT pair-clear the old holder's focused bit, and the stage LostFocus arm
+/// stores 0 unconditionally (no holder guard). Read and written from the
+/// single-threaded run_loop dispatch only -- Relaxed matches the HAS_FOCUS
+/// discipline.
 static LAST_FOCUSED_WINDOW_ID: AtomicI64 = AtomicI64::new(0);
 
 /// #180 (design D8): the last scale factor forwarded as
@@ -1867,6 +1875,14 @@ mod input_tests {
 
   #[test]
   fn input_event_routes_axis() {
+    // The ctrl= assertion reads the process-level KEYBOARD_MODIFIERS static;
+    // hold the shared input/focus test lock and seed a known-empty modifier
+    // state so a parallel test's CONTROL write cannot land between the read
+    // and the assert (aligned with axis_mouse_wheel_uses_line_delta).
+    let _guard = super::super::window::WINDOW_MIRRORS_TEST_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_modifiers(ModifiersState::empty());
     let evs = run_collected(|cell| {
       let d = AxisEventData {
         delta_y: 2.0,
@@ -1879,6 +1895,7 @@ mod input_tests {
       evs,
       vec!["MouseWheel(LineDelta(0.0, 2.0),ctrl=false)".to_string()]
     );
+    set_modifiers(ModifiersState::empty());
   }
 
   #[test]

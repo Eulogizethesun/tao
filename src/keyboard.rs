@@ -199,8 +199,10 @@ pub enum NativeKeyCode {
   Android(i32),
   /// The OpenHarmony key code of the event as delivered by the XComponent
   /// key-event path (`OH_NativeXComponent_KeyCode`; the device-observed
-  /// values match the `OH_NativeXComponent_KeyCode_KEY_*` constants, e.g.
-  /// 2012/2013 for KEY_DPAD_UP/KEY_DPAD_DOWN).
+  /// values match that enum's members, e.g. KEY_DPAD_UP = 2012 and
+  /// KEY_DPAD_DOWN = 2013 -- `native_xcomponent_key_event.h` defines them
+  /// as an enum body, not a `OH_NativeXComponent_KeyCode_KEY_*`-prefixed
+  /// constant family).
   Ohos(i32),
 }
 
