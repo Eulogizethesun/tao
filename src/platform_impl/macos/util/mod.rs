@@ -2,6 +2,10 @@
 // Copyright 2021-2023 Tauri Programme within The Commons Conservancy
 // SPDX-License-Identifier: Apache-2.0
 
+// `#[path]` is semantically null (rustc resolves `mod r#async;` to async.rs
+// either way); it exists so static analyzers that do not map raw-identifier
+// module names (bot-metric module discovery) still find the source file.
+#[path = "async.rs"]
 mod r#async;
 mod cursor;
 

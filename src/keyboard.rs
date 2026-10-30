@@ -185,14 +185,24 @@ mod modifiers_serde {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum NativeKeyCode {
+  /// The key could not be identified with a native scancode.
   Unidentified,
+  /// The Windows virtual-key code of the key.
   Windows(u16),
+  /// The macOS virtual key code of the key.
   MacOS(u16),
+  /// The GTK keyval of the key.
   Gtk(u16),
 
   /// This is the android "key code" of the event as returned by
   /// `KeyEvent.getKeyCode()`
   Android(i32),
+  /// The OpenHarmony key code of the event as delivered by the XComponent
+  /// key-event path (`OH_NativeXComponent_KeyCode`; the device-observed
+  /// values match that enum's members, e.g. KEY_DPAD_UP = 2012 and
+  /// KEY_DPAD_DOWN = 2013 -- `native_xcomponent_key_event.h` defines them
+  /// as an enum body, not a `OH_NativeXComponent_KeyCode_KEY_*`-prefixed
+  /// constant family).
   Ohos(i32),
 }
 
@@ -217,7 +227,7 @@ pub enum KeyCode {
   /// to allow the user to specify keybindings for keys which
   /// are not defined by this API.
   Unidentified(NativeKeyCode),
-  /// <kbd>`</kbd> on a US keyboard. This is also called a backtick or grave.
+  /// <kbd>\`</kbd> on a US keyboard. This is also called a backtick or grave.
   /// This is the <kbd>半角</kbd>/<kbd>全角</kbd>/<kbd>漢字</kbd>
   /// (hankaku/zenkaku/kanji) key on Japanese keyboards
   Backquote,
@@ -455,6 +465,7 @@ pub enum KeyCode {
   NumpadDecimal,
   /// <kbd>/</kbd>
   NumpadDivide,
+  /// The <kbd>Enter</kbd> key on the numeric keypad (distinct from Return).
   NumpadEnter,
   /// <kbd>=</kbd>
   NumpadEqual,
@@ -507,13 +518,17 @@ pub enum KeyCode {
   ///
   /// This also the "back" button (triangle) on Android.
   BrowserBack,
+  /// The browser favorites or bookmarks key.
   BrowserFavorites,
   /// Some laptops place this key to the right of the <kbd>↑</kbd> key.
   BrowserForward,
   /// The "home" button on Android.
   BrowserHome,
+  /// The browser refresh or reload key.
   BrowserRefresh,
+  /// The browser search key.
   BrowserSearch,
+  /// The browser stop key (stops loading a page).
   BrowserStop,
   /// <kbd>Eject</kbd> or <kbd>⏏</kbd>. This key is placed in the function section on some Apple
   /// keyboards.
@@ -522,24 +537,40 @@ pub enum KeyCode {
   LaunchApp1,
   /// Sometimes labelled <kbd>Calculator</kbd> on the keyboard
   LaunchApp2,
+  /// Opens the default mail application.
   LaunchMail,
+  /// Toggles between play and pause of the current media.
   MediaPlayPause,
+  /// Selects the next media application or track list.
   MediaSelect,
+  /// Stops the current media playback.
   MediaStop,
+  /// Skips to the next media track.
   MediaTrackNext,
+  /// Skips to the previous media track.
   MediaTrackPrevious,
   /// This key is placed in the function section on some Apple keyboards, replacing the
   /// <kbd>Eject</kbd> key.
   Power,
+  /// Puts the system into sleep mode.
   Sleep,
+  /// Lowers the system audio volume.
   AudioVolumeDown,
+  /// Mutes or unmutes the system audio.
   AudioVolumeMute,
+  /// Raises the system audio volume.
   AudioVolumeUp,
+  /// Wakes the system from sleep.
   WakeUp,
+  /// The <kbd>Hyper</kbd> modifier key (historical predecessor of Super).
   Hyper,
+  /// The <kbd>Turbo</kbd> key found on some keyboards.
   Turbo,
+  /// Aborts the current operation.
   Abort,
+  /// Resumes a previously suspended program or operation.
   Resume,
+  /// Suspends the current program or operation.
   Suspend,
   /// Found on Sun’s USB keyboard.
   Again,
@@ -902,7 +933,9 @@ pub enum Key<'a> {
   Shift,
   /// The Symbol modifier key (used on some virtual keyboards).
   Symbol,
+  /// Locks the Symbol modifier function of the keyboard.
   SymbolLock,
+  /// The `Hyper` modifier key (historical predecessor of Super).
   Hyper,
   /// Used to enable "super" modifier function for interpreting concurrent or subsequent keyboard
   /// input. This key value is used for the "Windows Logo" key and the Apple `Command` or `⌘` key.
@@ -970,6 +1003,7 @@ pub enum Key<'a> {
   Again,
   /// The Attention (Attn) key.
   Attn,
+  /// The Cancel key, used to cancel the current operation.
   Cancel,
   /// Show the application’s context menu.
   /// This key is commonly found between the right `Super` key and the right `Control` key.
@@ -978,6 +1012,7 @@ pub enum Key<'a> {
   /// now more generally used to exit or "escape" the current context, such as closing a dialog
   /// or exiting full screen mode.
   Escape,
+  /// The Execute key, used to execute the current selection or operation.
   Execute,
   /// Open the Find dialog. (`APPCOMMAND_FIND`)
   Find,
@@ -996,6 +1031,7 @@ pub enum Key<'a> {
   Play,
   /// The properties (Props) key.
   Props,
+  /// The Select key, used to select the current item or option.
   Select,
   /// The ZoomIn key. (`KEYCODE_ZOOM_IN`)
   ZoomIn,
@@ -1008,6 +1044,7 @@ pub enum Key<'a> {
   BrightnessUp,
   /// Toggle removable media to eject (open) and insert (close) state. (`KEYCODE_MEDIA_EJECT`)
   Eject,
+  /// The LogOff key, used to log the current user off.
   LogOff,
   /// Toggle power state. (`KEYCODE_POWER`)
   /// Note: Note: Some devices might not expose this key to the operating environment.
@@ -1027,6 +1064,7 @@ pub enum Key<'a> {
   WakeUp,
   /// Initate the multi-candidate mode.
   AllCandidates,
+  /// Toggle alphanumeric input mode.
   Alphanumeric,
   /// Initiate the Code Input mode to allow characters to be entered by
   /// their code points.
@@ -1049,16 +1087,22 @@ pub enum Key<'a> {
   GroupPrevious,
   /// Toggle between or cycle through input modes of IMEs.
   ModeChange,
+  /// Select the next candidate in the candidate list of an IME.
   NextCandidate,
   /// Accept current input method sequence without
   /// conversion in IMEs.
   NonConvert,
+  /// Select the previous candidate in the candidate list of an IME.
   PreviousCandidate,
+  /// The Process key, used by the IME to indicate in-progress composition.
   Process,
+  /// The Single Candidate key, showing a single IME candidate.
   SingleCandidate,
   /// Toggle between Hangul and English modes.
   HangulMode,
+  /// The Hanja mode key, used to convert Hangul to Hanja.
   HanjaMode,
+  /// The Junja mode key.
   JunjaMode,
   /// The Eisu key. This key may close the IME, but its purpose is defined by the current IME.
   /// (`KEYCODE_EISU`)
@@ -1146,6 +1190,7 @@ pub enum Key<'a> {
   /// Save the current document or message. (`APPCOMMAND_SAVE`)
   Save,
   /// Spellcheck the current document or selection. (`APPCOMMAND_SPELL_CHECK`)
+  /// The SpellCheck key, used to invoke the spell checker.
   SpellCheck,
   /// The `11` key found on media numpads that
   /// have buttons from `1` ... `12`.
@@ -1210,12 +1255,19 @@ pub enum Key<'a> {
   LaunchMail,
   /// The "Media Player" key. (`APPCOMMAND_LAUNCH_MEDIA_SELECT`)
   LaunchMediaPlayer,
+  /// The "Music Player" key. (`KEYCODE_MUSIC`)
   LaunchMusicPlayer,
+  /// The "Phone" key. (`KEYCODE_PHONE`)
   LaunchPhone,
+  /// The "Screen Saver" key, used to activate the screen saver.
   LaunchScreenSaver,
+  /// The "Spreadsheet" key, used to launch the default spreadsheet application.
   LaunchSpreadsheet,
+  /// The "Web Browser" key, used to launch the default web browser.
   LaunchWebBrowser,
+  /// The "WebCam" key, used to launch the webcam application.
   LaunchWebCam,
+  /// The "Word Processor" key, used to launch the default word processor.
   LaunchWordProcessor,
   /// Navigate to previous content or page in current history. (`APPCOMMAND_BROWSER_BACKWARD`)
   BrowserBack,
@@ -1248,11 +1300,13 @@ pub enum Key<'a> {
   GoHome,
   /// The Headset Hook key. (`KEYCODE_HEADSETHOOK`)
   HeadsetHook,
+  /// The Last Number Redial key. (`KEYCODE_LASTNUMBERREDIAL`)
   LastNumberRedial,
   /// The Notification key. (`KEYCODE_NOTIFICATION`)
   Notification,
   /// Toggle between manner mode state: silent, vibrate, ring, ... (`KEYCODE_MANNER_MODE`)
   MannerMode,
+  /// The Voice Dial key, used to initiate voice dialing. (`KEYCODE_VOICE_DIAL`)
   VoiceDial,
   /// Switch to viewing TV. (`KEYCODE_TV`)
   TV,
@@ -1566,6 +1620,8 @@ pub enum Key<'a> {
 }
 
 impl<'a> Key<'a> {
+  /// Returns the text representation of this key, if the key produces text
+  /// (character keys, `Enter`, `Backspace`, `Tab`, `Space` and `Escape`).
   pub fn to_text(&self) -> Option<&'a str> {
     match self {
       Key::Character(ch) => Some(*ch),
@@ -1590,8 +1646,12 @@ impl<'a> From<&'a str> for Key<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum KeyLocation {
+  /// The key is not on the numpad and has no left/right distinction.
   Standard,
+  /// The key is the left variant of a duplicated key (e.g. left `Shift`).
   Left,
+  /// The key is the right variant of a duplicated key (e.g. right `Shift`).
   Right,
+  /// The key is on the numeric keypad.
   Numpad,
 }

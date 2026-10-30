@@ -18,7 +18,9 @@ pub use crate::icon::{BadIcon, Icon};
 /// Progress State
 #[derive(Debug, Clone, Copy)]
 pub enum ProgressState {
+  /// The progress bar is not shown.
   None,
+  /// Normal progress state.
   Normal,
   /// **Treated as Normal in linux and macOS**
   Indeterminate,
@@ -28,6 +30,7 @@ pub enum ProgressState {
   Error,
 }
 
+/// A progress bar state and progress value to expose on the taskbar or dock icon.
 pub struct ProgressBarState {
   /// The progress bar state.
   pub state: Option<ProgressState>,
@@ -252,6 +255,9 @@ pub struct WindowAttributes {
   /// The default is `None`.
   pub window_icon: Option<Icon>,
 
+  /// The preferred window theme, if the platform supports theming.
+  ///
+  /// The default is `None`.
   pub preferred_theme: Option<Theme>,
 
   /// Whether the window should be initially focused or not.
@@ -336,7 +342,7 @@ impl WindowBuilder {
   ///
   /// - **OpenHarmony:** For windows created as additional UIAbilities the
   ///   requested size travels through `startAbility` `StartOptions` and must
-  ///   be positive — a zero or negative value is rejected by the ArkTS
+  ///   be positive - a zero or negative value is rejected by the ArkTS
   ///   handler. Because the spawn is asynchronous, that rejection happens
   ///   after the creation call has already returned: it surfaces as a log
   ///   line and a consumable record readable via
@@ -481,6 +487,13 @@ impl WindowBuilder {
   ///
   /// See [`Window::set_visible`] for details.
   ///
+  /// ## Platform-specific
+  ///
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
+  ///   not consume a `visible: false` attribute during window creation
+  ///   (committer #168); windows are created visible. Toggle visibility with
+  ///   [`Window::set_visible`] after creation instead.
+  ///
   /// [`Window::set_visible`]: crate::window::Window::set_visible
   #[inline]
   pub fn with_visible(mut self, visible: bool) -> Self {
@@ -534,6 +547,13 @@ impl WindowBuilder {
   ///
   /// See [`Window::set_window_icon`] for details.
   ///
+  /// ## Platform-specific
+  ///
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
+  ///   not consume a window icon during window creation (committer #168);
+  ///   the runtime `set_window_icon` on OHOS is a silent no-op (no dispatch),
+  ///   so the icon has no effect for the lifetime of the window.
+  ///
   /// [`Window::set_window_icon`]: crate::window::Window::set_window_icon
   #[inline]
   pub fn with_window_icon(mut self, window_icon: Option<Icon>) -> Self {
@@ -546,13 +566,17 @@ impl WindowBuilder {
   /// ## Platform-specific:
   ///
   /// - **Windows**: It is recommended to always use the same theme used
-  ///   in [`EventLoopBuilderExtWindows::with_theme`] for this method also
-  ///   or use `None` so it automatically uses the theme used in [`EventLoopBuilderExtWindows::with_theme`]
-  ///   or falls back to the system preference, because [`EventLoopBuilderExtWindows::with_theme`] changes
+  ///   in `EventLoopBuilderExtWindows::with_theme` for this method also
+  ///   or use `None` so it automatically uses the theme used in
+  ///   `EventLoopBuilderExtWindows::with_theme`
+  ///   or falls back to the system preference, because
+  ///   `EventLoopBuilderExtWindows::with_theme` changes
   ///   the theme for some controls like context menus which is app-wide and can't be changed by this method.
   ///
-  /// [`EventLoopBuilderExtWindows::with_theme`]: crate::platform::windows::EventLoopBuilderExtWindows::with_theme
-  #[allow(rustdoc::broken_intra_doc_links)]
+  /// - **OpenHarmony:** Ignored at creation time - the platform backend does
+  ///   not consume a preferred theme during window creation (committer #168);
+  ///   the window follows the system theme. `Window::set_theme` runtime
+  ///   requests are unaffected.
   #[inline]
   pub fn with_theme(mut self, theme: Option<Theme>) -> WindowBuilder {
     self.window.preferred_theme = theme;
@@ -589,7 +613,7 @@ impl WindowBuilder {
   ///   15+); the window's content is excluded from screenshots, recording, and
   ///   casting. Requires `ohos.permission.PRIVACY_WINDOW` (normal,
   ///   system_grant) declared in the app's entry module; when the permission is
-  ///   missing the call only logs a warning — the window is left unprotected
+  ///   missing the call only logs a warning - the window is left unprotected
   ///   and no error is reported (same degradation as
   ///   `Window::set_content_protection`).
   #[inline]
@@ -662,7 +686,7 @@ impl Window {
 
   /// Returns the scale factor that can be used to map logical pixels to physical pixels, and vice versa.
   ///
-  /// See the [`dpi`](crate::dpi) module for more information.
+  /// See the [`dpi`] module for more information.
   ///
   /// Note that this value can change depending on user action (for example if the window is
   /// moved to another screen); as such, tracking `WindowEvent::ScaleFactorChanged` events is
@@ -752,11 +776,17 @@ impl Window {
   /// - **iOS:** Can only be called on the main thread. Sets the top left coordinates of the
   ///   window in the screen space coordinate system.
   /// - **Android / Linux(Wayland):** Unsupported.
-  /// - **OpenHarmony:** Only affects Float sub-windows (window_id > 0). The main UIAbility
-  ///   window (window_id = 0) is system-managed — `window.Window.moveWindowTo()` returns
-  ///   error 1300002 ("window state is abnormal"), so the call is a silent no-op for the
-  ///   main window. Create a Float sub-window via `WebviewWindowBuilder` (or
-  ///   `create_os_window`) to set position.
+  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `move_window_to` forwards to
+  ///   `window.Window.moveWindowTo(x, y)` for the id-0 main UIAbility window (window_id = 0),
+  ///   sub-windows, and spawned UIAbility instances alike (see
+  ///   `doc/ohos-window-test-mapping.md` in the tauri repo). Two caveats: the resize
+  ///   path is clamped by the system WM (freeform windows), and for the main window the move
+  ///   itself is dispatched but the resulting geometry is not reliably readable back from JS
+  ///   (`outer_position()` reads the `window_rect` callback, which a pure move does not
+  ///   trigger). Error 1300002 ("window state is abnormal") only appears transiently when the
+  ///   window is in an abnormal state - it is not the expected outcome of a main-window call
+  ///   (an earlier revision of this note claimed a guaranteed 1300002 + silent no-op, which
+  ///   contradicted the implementation).
   #[inline]
   pub fn set_outer_position<P: Into<Position>>(&self, position: P) {
     self.window.set_outer_position(position.into())
@@ -785,11 +815,19 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
-  /// - **OpenHarmony:** Only affects Float sub-windows (window_id > 0). The main UIAbility
-  ///   window (window_id = 0) is system-managed — `window.Window.resize()` returns error
-  ///   1300002 ("window state is abnormal"), so the call is a silent no-op for the main
-  ///   window. Create a Float sub-window via `WebviewWindowBuilder` (or `create_os_window`)
-  ///   to resize.
+  /// - **OpenHarmony:** The dispatch chain runs unconditionally - `set_inner_size` sends
+  ///   `resize_inner_window` (bridge action "resize-inner"), whose ArkTS handler measures the
+  ///   system decor first (chrome = outer windowRect - drawableRect per axis, from one atomic
+  ///   `getWindowProperties()` snapshot) and then resizes to w + chrome / h + chrome, for the
+  ///   id-0 main UIAbility window (window_id = 0), sub-windows, and spawned UIAbility instances
+  ///   alike (see `doc/ohos-window-test-mapping.md` in the tauri repo). The decor compensation
+  ///   belongs to the resize-inner action: the plugin facade's `resize_window` command maps to
+  ///   the bare "resize" action, which resizes without compensation.
+  ///   The resize takes effect but the applied size is clamped by the system WM (freeform
+  ///   windows), so the result may differ from the requested value. Error 1300002 ("window
+  ///   state is abnormal") only appears transiently when the window is in an abnormal state -
+  ///   it is not the expected outcome of a main-window call (an earlier revision of this note
+  ///   claimed a guaranteed 1300002 + silent no-op, which contradicted the implementation).
   #[inline]
   pub fn set_inner_size<S: Into<Size>>(&self, size: S) {
     self.window.set_inner_size(size.into())
@@ -869,6 +907,14 @@ impl Window {
   ///
   /// - **Android:** Unsupported.
   /// - **iOS:** Can only be called on the main thread.
+  /// - **OpenHarmony:** split by window kind (issue Eulogizethesun/tauri#237).
+  ///   On UIAbility windows (the id-0 main window and spawned
+  ///   instances) hiding is not supported (no window-level hide API):
+  ///   `set_visible(false)` logs and leaves the
+  ///   window untouched -- the tauri layer surfaces an `ohos_unsupported`
+  ///   error for it. On sub-windows `set_visible(false)` hides the window
+  ///   (the d.ts `minimize()` dual semantics; `showWindow()` restores it)
+  ///   and `set_visible(true)` shows/restores it.
   #[inline]
   pub fn set_visible(&self, visible: bool) {
     self.window.set_visible(visible)
@@ -891,6 +937,12 @@ impl Window {
   /// - **macOS**: If the window is already focused, it is not possible to unfocus it after calling `set_focusable(false)`.
   ///   In this case, you might consider calling [`Window::set_focus`] but it will move the window to the back i.e. at the bottom in terms of z-order.
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony**: Forwarded to the window manager for the id-0 main
+  ///   window, sub-windows, and spawned UIAbility instances alike; success
+  ///   or rejection is arbitrated by the system (device arbitration
+  ///   2026-10-21: the main window path is dispatched, not silently no-op'd
+  ///   - a rejection surfaces as a warning log carrying the window id and
+  ///   the platform error).
   #[inline]
   pub fn set_focusable(&self, focusable: bool) {
     self.window.set_focusable(focusable)
@@ -911,6 +963,10 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** Returns the intent bit recorded by
+  ///   [`Window::set_always_on_top`](Self::set_always_on_top), not the system
+  ///   truth - the platform exposes no synchronous always-on-top query, so this
+  ///   can drift from the actual z-order.
   #[inline]
   pub fn is_always_on_top(&self) -> bool {
     self.window.is_always_on_top()
@@ -936,6 +992,13 @@ impl Window {
   ///   resizable to false after it. You might need a mechanism to check the window is really
   ///   maximized.
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** on UIAbility windows (the main window and spawned
+  ///   instances) only the local resizable cache and the edge-drag switch
+  ///   are touched -- the title-bar decoration-bit dispatch is skipped (the
+  ///   ArkTS handler rejects it for UIAbility windows) and the drag switch
+  ///   routes by window id (main window `setResizeByDragEnabled`, API 14+;
+  ///   every other window `enableDrag`, API 20+). Sub-windows additionally
+  ///   dispatch the decoration bit.
   #[inline]
   pub fn set_resizable(&self, resizable: bool) {
     self.window.set_resizable(resizable)
@@ -946,6 +1009,9 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) --
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_minimizable(&self, minimizable: bool) {
     self.window.set_minimizable(minimizable)
@@ -957,6 +1023,9 @@ impl Window {
   ///
   /// - **macOS:** Disables the "zoom" button in the window titlebar, which is also used to enter fullscreen mode.
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) --
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_maximizable(&self, maximizable: bool) {
     self.window.set_maximizable(maximizable)
@@ -969,6 +1038,9 @@ impl Window {
   /// - **Linux:** "GTK+ will do its best to convince the window manager not to show a close button.
   ///   Depending on the system, this function may not have any effect when called on a window that is already visible"
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** not supported on UIAbility windows (main + spawned) --
+  ///   the decoration buttons are OS-managed; the call is ignored (the tauri
+  ///   layer surfaces an error). Sub-windows update the button bit.
   #[inline]
   pub fn set_closable(&self, closable: bool) {
     self.window.set_closable(closable)
@@ -1009,6 +1081,10 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local mirror. On a sub-window a
+  ///   `set_visible(false)` hide intent also reports minimized (the d.ts
+  ///   `minimize()` dual semantics -- the show path's restore leg reads this
+  ///   bit) until the next show or window-status backfill.
   #[inline]
   pub fn is_minimized(&self) -> bool {
     self.window.is_minimized()
@@ -1019,6 +1095,9 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local mirror. A refused UIAbility-window
+  ///   hide keeps reporting visible (the window was left untouched); a sub-window
+  ///   hide flips it off until the next show or window-status event.
   #[inline]
   pub fn is_visible(&self) -> bool {
     self.window.is_visible()
@@ -1029,6 +1108,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** reads the local resizable cache on every window kind
+  ///   (the edge-drag switch itself is not queryable).
   #[inline]
   pub fn is_resizable(&self) -> bool {
     self.window.is_resizable()
@@ -1039,6 +1120,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_minimizable(&self) -> bool {
     self.window.is_minimizable()
@@ -1049,6 +1132,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **Linux / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_maximizable(&self) -> bool {
     self.window.is_maximizable()
@@ -1059,6 +1144,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** UIAbility windows (main + spawned) always report
+  ///   true (OS-managed buttons); sub-windows read the local bit.
   #[inline]
   pub fn is_closable(&self) -> bool {
     self.window.is_closable()
@@ -1093,6 +1180,11 @@ impl Window {
   /// - **Windows:** Screen saver is disabled in fullscreen mode.
   /// - **Linux:** The window will only fullscreen to current monitor no matter which enum variant.
   /// - **Android:** Unsupported.
+  /// - **OpenHarmony:** Both `Fullscreen` variants fold into the same immersive
+  ///   boolean switch (no exclusive-fullscreen concept); `fullscreen()` always
+  ///   reports `Fullscreen::Borderless(None)` regardless of what was set. The
+  ///   intent is not read back from the system (deliberate - reading it back
+  ///   would introduce a second, drift-prone source of truth).
   #[inline]
   pub fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) {
     self.window.set_fullscreen(fullscreen)
@@ -1128,6 +1220,9 @@ impl Window {
   /// - **Windows**: There is no guarantee that the window will be the bottom most but it will try to be.
   /// - **Linux(x11):** Result depends on the system's window manager. Consider this setting a suggestion.
   /// - **Linux(Wayland) / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** Unsupported - the OHOS platform backend has no
+  ///   implementation, so the call is a no-op that logs one warn entry; the
+  ///   signature stays `()` (it does not return `Err`).
   // TODO: Unsupported in gtk4
   #[inline]
   pub fn set_always_on_bottom(&self, always_on_bottom: bool) {
@@ -1140,6 +1235,10 @@ impl Window {
   ///
   /// - **Linux(x11):** Result depends on the system's window manager. Consider this setting a suggestion.
   /// - **Linux(Wayland) / iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** Records the intent bit and dispatches `setWindowTopmost`
+  ///   (API 14+, requires `ohos.permission.WINDOW_TOPMOST`); only effective for
+  ///   freeform windows - the main (UIAbility) window is the supported form, and
+  ///   Sub-windows error out (ArkTS throws; tao catches and warns, non-fatal).
   // TODO: Unsupported in gtk4
   #[inline]
   pub fn set_always_on_top(&self, always_on_top: bool) {
@@ -1176,6 +1275,9 @@ impl Window {
   ///
   /// - **Linux / macOS**: Unlike windows, progress bar is app-wide and not specific to this window. Only supported desktop environments with `libunity` (e.g. GNOME).
   /// - **iOS / Android:** Unsupported.
+  /// - **OpenHarmony:** Unsupported - silent no-op (the OHOS platform backend has
+  ///   no implementation, so the facade body is compiled out for OHOS), same as
+  ///   the upstream iOS/Android behavior; OHOS has no taskbar progress concept.
   #[inline]
   pub fn set_progress_bar(&self, _progress: ProgressBarState) {
     #[cfg(all(
@@ -1259,6 +1361,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android / Windows:** Unsupported.
+  /// - **OpenHarmony:** Unsupported - silent no-op (no OHOS implementation; the
+  ///   facade body is compiled out for OHOS). OHOS has no multi-workspace concept.
   pub fn set_visible_on_all_workspaces(&self, #[allow(unused)] visible: bool) {
     #[cfg(all(
       any(target_os = "macos", target_os = "linux"),
@@ -1296,6 +1400,8 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android:** Always returns an [`ExternalError::NotSupported`].
+  /// - **OpenHarmony:** Always returns an [`ExternalError::NotSupported`] (same
+  ///   shape as iOS/Android - the platform exposes no warp-cursor API).
   #[inline]
   pub fn set_cursor_position<P: Into<Position>>(&self, position: P) -> Result<(), ExternalError> {
     self.window.set_cursor_position(position.into())
@@ -1310,6 +1416,13 @@ impl Window {
   ///
   /// - **macOS:** This locks the cursor in a fixed location, which looks visually awkward.
   /// - **iOS / Android:** Always returns an [`ExternalError::NotSupported`].
+  /// - **OpenHarmony:** API 22+ only - `OH_WindowManager_LockCursor` (resolved via
+  ///   dlopen in openharmony-ability); lower API versions return
+  ///   [`ExternalError::NotSupported`]. The lock is confined-follow (cursor stays
+  ///   within the window area, like Windows `ClipCursor`) and is only effective
+  ///   while the window is focused: the system releases it automatically on focus
+  ///   loss, so apps that need a persistent lock must listen for `Focused(true)`
+  ///   and re-grab.
   #[inline]
   pub fn set_cursor_grab(&self, grab: bool) -> Result<(), ExternalError> {
     self.window.set_cursor_grab(grab)
@@ -1375,6 +1488,9 @@ impl Window {
   /// ## Platform-specific
   ///
   /// - **iOS / Android / Linux(Wayland)**: Unsupported, returns `0,0`.
+  /// - **OHOS**: fed by the ArkTS `onMouse` handlers (screen-global frame);
+  ///   before any feed the call fails with `Err(NotSupported)` instead of
+  ///   returning the `(0,0)` sentinel (ohos-cursor-passthrough D3/R5).
   #[inline]
   pub fn cursor_position(&self) -> Result<PhysicalPosition<f64>, ExternalError> {
     self.window.cursor_position()
@@ -1505,35 +1621,57 @@ pub enum CursorIcon {
 
   /// Cursor showing that something cannot be done.
   NotAllowed,
+  /// Cursor indicating a context menu is available.
   ContextMenu,
+  /// Cursor indicating a table cell can be selected.
   Cell,
+  /// Cursor indicating vertical text can be selected.
   VerticalText,
+  /// Cursor indicating an alias or shortcut is to be created.
   Alias,
+  /// Cursor indicating something can be copied.
   Copy,
+  /// Cursor indicating something cannot be dropped here.
   NoDrop,
   /// Indicates something can be grabbed.
   Grab,
   /// Indicates something is grabbed.
   Grabbing,
+  /// Cursor indicating scrolling in any direction is possible.
   AllScroll,
+  /// Cursor indicating the view can be zoomed in.
   ZoomIn,
+  /// Cursor indicating the view can be zoomed out.
   ZoomOut,
 
   /// Indicate that some edge is to be moved. For example, the 'SeResize' cursor
   /// is used when the movement starts from the south-east corner of the box.
   EResize,
+  /// Cursor indicating the north edge is to be moved.
   NResize,
+  /// Cursor indicating the north-east edge is to be moved.
   NeResize,
+  /// Cursor indicating the north-west edge is to be moved.
   NwResize,
+  /// Cursor indicating the south edge is to be moved.
   SResize,
+  /// Cursor indicating the south-east edge is to be moved.
   SeResize,
+  /// Cursor indicating the south-west edge is to be moved.
   SwResize,
+  /// Cursor indicating the west edge is to be moved.
   WResize,
+  /// Cursor indicating the east-west edges are to be moved.
   EwResize,
+  /// Cursor indicating the north-south edges are to be moved.
   NsResize,
+  /// Cursor indicating the north-east/south-west edges are to be moved.
   NeswResize,
+  /// Cursor indicating the north-west/south-east edges are to be moved.
   NwseResize,
+  /// Cursor indicating a table column is to be resized.
   ColResize,
+  /// Cursor indicating a table row is to be resized.
   RowResize,
 }
 
@@ -1542,20 +1680,26 @@ pub enum CursorIcon {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fullscreen {
+  /// A fullscreen mode using the exact given video mode, switching the
+  /// monitor's mode if necessary.
   Exclusive(VideoMode),
 
   /// Providing `None` to `Borderless` will fullscreen on the current monitor.
   Borderless(Option<MonitorHandle>),
 }
 
+/// The theme variant of the window.
 #[non_exhaustive]
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub enum Theme {
+  /// The light theme.
   #[default]
   Light,
+  /// The dark theme.
   Dark,
 }
 
+/// The type of user attention to request on the window.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UserAttentionType {
@@ -1592,6 +1736,8 @@ pub struct WindowSizeConstraints {
 }
 
 impl WindowSizeConstraints {
+  /// Creates new size constraints from the given minimum and maximum sizes;
+  /// `None` leaves the corresponding bound unconstrained.
   pub fn new(
     min_width: Option<PixelUnit>,
     min_height: Option<PixelUnit>,
@@ -1690,13 +1836,21 @@ impl WindowSizeConstraints {
 /// Defines the orientation that a window resize will be performed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ResizeDirection {
+  /// Resize from the east (right) edge.
   East,
+  /// Resize from the north (top) edge.
   North,
+  /// Resize from the north-east (top-right) corner.
   NorthEast,
+  /// Resize from the north-west (top-left) corner.
   NorthWest,
+  /// Resize from the south (bottom) edge.
   South,
+  /// Resize from the south-east (bottom-right) corner.
   SouthEast,
+  /// Resize from the south-west (bottom-left) corner.
   SouthWest,
+  /// Resize from the west (left) edge.
   West,
 }
 

@@ -19,7 +19,7 @@ fn main() {
   println!("Ime position will system default");
   println!("Click to set ime position to cursor's");
 
-  let mut cursor_position = PhysicalPosition::new(0.0, 0.0);
+  let mut cursor_position = PhysicalPosition::new(0.0f64, 0.0f64);
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
 

@@ -903,7 +903,7 @@ impl Window {
   }
 
   pub(crate) fn set_ime_position_physical(&self, x: i32, y: i32) {
-    if unsafe { GetSystemMetrics(SM_IMMENABLED) } != 0 {
+    if unsafe { GetSystemMetrics(SM_IMMENABLED) } != 0i32 {
       let composition_form = COMPOSITIONFORM {
         dwStyle: CFS_POINT,
         ptCurrentPos: POINT { x, y },
@@ -1186,7 +1186,7 @@ unsafe fn init<T: 'static>(
             let frame_thickness = if window_flags.contains_shadow() {
               util::get_frame_thickness(dpi)
             } else {
-              0
+              0i32
             };
 
             // Only the starting position x needs to be accounted
@@ -1205,7 +1205,7 @@ unsafe fn init<T: 'static>(
 
     let desired_size = attributes
       .inner_size
-      .unwrap_or_else(|| PhysicalSize::new(800, 600).into());
+      .unwrap_or_else(|| PhysicalSize::new(800i32, 600i32).into());
     let clamped_size = attributes
       .inner_size_constraints
       .clamp(desired_size, target_monitor.scale_factor());

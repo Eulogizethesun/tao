@@ -15,10 +15,10 @@ fn main() {
   env_logger::init();
   let event_loop = EventLoop::new();
 
-  let min_width = 400.0;
-  let max_width = 800.0;
-  let min_height = 200.0;
-  let max_height = 400.0;
+  let min_width = 400.0f64;
+  let max_width = 800.0f64;
+  let min_height = 200.0f64;
+  let max_height = 400.0f64;
   let mut size_constraints = WindowSizeConstraints::default();
 
   let window = WindowBuilder::new().build(&event_loop).unwrap();

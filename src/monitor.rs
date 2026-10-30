@@ -4,13 +4,12 @@
 
 //! Types useful for interacting with a user's monitors.
 //!
-//! If you want to get basic information about a monitor, you can use the [`MonitorHandle`][monitor_handle]
+//! If you want to get basic information about a monitor, you can use the [`MonitorHandle`]
 //! type. This is retrieved from one of the following methods, which return an iterator of
-//! [`MonitorHandle`][monitor_handle]:
+//! [`MonitorHandle`]:
 //! - [`EventLoopWindowTarget::available_monitors`][loop_get]
 //! - [`Window::available_monitors`][window_get].
 //!
-//! [monitor_handle]: crate::monitor::MonitorHandle
 //! [loop_get]: crate::event_loop::EventLoopWindowTarget::available_monitors
 //! [window_get]: crate::window::Window::available_monitors
 use crate::{
@@ -142,7 +141,7 @@ impl MonitorHandle {
 
   /// Returns the scale factor that can be used to map logical pixels to physical pixels, and vice versa.
   ///
-  /// See the [`dpi`](crate::dpi) module for more information.
+  /// See the [`dpi`] module for more information.
   ///
   /// ## Platform-specific
   ///
@@ -156,6 +155,9 @@ impl MonitorHandle {
   ///
   /// ## Platform-specific
   /// - **Linux:** Unsupported. This will always return empty iterator.
+  /// - **OpenHarmony:** Returns a single item - the monitor's current mode. The
+  ///   OHOS SDK exposes no per-display video-mode list and no color-depth API
+  ///   (see the impl comment in `platform_impl::ohos::MonitorHandle::video_modes`).
   #[inline]
   pub fn video_modes(&self) -> impl Iterator<Item = VideoMode> {
     self.inner.video_modes()
