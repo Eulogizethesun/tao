@@ -751,10 +751,11 @@ struct CreationAttrPlan {
 /// (PR#28 review T28-5, unified `windowId === 0` criterion; gate F1 extended
 /// the seed to sub-windows, so a sub-window created resizable(false) rides
 /// BOTH the decoration-flags leg and the drag leg -- same shape as the
-/// runtime setter). Runtime setters on UIAbility-kind windows error
-/// out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
-/// always passes there -- "always maximizable" is the disclosed consistent
-/// reading (D7).
+/// runtime setter). Only the three button setters (set_minimizable /
+/// set_maximizable / set_closable) error out on UIAbility-kind windows
+/// (set_resizable does not -- it rides the set_resize_by_drag leg above),
+/// so the set_maximized(true) FLAG_MAXIMIZABLE guard always passes there --
+/// "always maximizable" is the disclosed consistent reading (D7).
 fn creation_attr_plan(
   attrs: &window::WindowAttributes,
   is_ui_ability_window: bool,
