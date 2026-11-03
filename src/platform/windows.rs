@@ -17,7 +17,9 @@ use crate::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
+/// A handle to a Windows window (`HWND`), represented as its raw pointer value.
 pub type HWND = isize;
+/// A handle to a Windows menu (`HMENU`), represented as its raw pointer value.
 pub type HMENU = isize;
 
 /// Additional methods on `EventLoop` that are specific to Windows.

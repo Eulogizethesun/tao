@@ -29,7 +29,7 @@ fn main() {
   #[cfg(target_os = "linux")]
   let parent_window = main_window.gtk_window();
 
-  let child_window_builder = WindowBuilder::new().with_inner_size(LogicalSize::new(200, 200));
+  let child_window_builder = WindowBuilder::new().with_inner_size(LogicalSize::new(200i32, 200i32));
 
   #[cfg(any(target_os = "windows", target_os = "macos"))]
   let child_window_builder = child_window_builder.with_parent_window(parent_window);

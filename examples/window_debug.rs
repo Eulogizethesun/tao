@@ -21,7 +21,7 @@ fn main() {
 
   let window = WindowBuilder::new()
     .with_title("A fantastic window!")
-    .with_inner_size(LogicalSize::new(100.0, 100.0))
+    .with_inner_size(LogicalSize::new(100.0f64, 100.0f64))
     .build(&event_loop)
     .unwrap();
 

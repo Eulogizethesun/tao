@@ -254,7 +254,7 @@ impl<T: 'static> EventLoop<T> {
       runner.poll();
       'main: loop {
         if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-          break 'main 0;
+          break 'main 0i32;
         }
 
         let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
@@ -1611,8 +1611,8 @@ unsafe fn public_window_callback_inner<T: 'static>(
             continue;
           }
 
-          let x = location.x as f64 + (input.x % 100) as f64 / 100f64;
-          let y = location.y as f64 + (input.y % 100) as f64 / 100f64;
+          let x = location.x as f64 + (input.x % 100i32) as f64 / 100f64;
+          let y = location.y as f64 + (input.y % 100i32) as f64 / 100f64;
           let location = PhysicalPosition::new(x, y);
           subclass_input.send_event(Event::WindowEvent {
             window_id: RootWindowId(WindowId(window.0 as _)),
@@ -2066,25 +2066,25 @@ unsafe fn public_window_callback_inner<T: 'static>(
               // shared and nudging away from the wrong monitor based on those.
               let delta_nudge_to_dpi_monitor = (
                 if wrong_monitor_rect.left == new_monitor_rect.right {
-                  -1
+                  -1i32
                 } else if wrong_monitor_rect.right == new_monitor_rect.left {
-                  1
+                  1i32
                 } else {
-                  0
+                  0i32
                 },
                 if wrong_monitor_rect.bottom == new_monitor_rect.top {
-                  1
+                  1i32
                 } else if wrong_monitor_rect.top == new_monitor_rect.bottom {
-                  -1
+                  -1i32
                 } else {
-                  0
+                  0i32
                 },
               );
 
               let abort_after_iterations = new_monitor_rect.right - new_monitor_rect.left
                 + new_monitor_rect.bottom
                 - new_monitor_rect.top;
-              for _ in 0..abort_after_iterations {
+              for _ in 0i32..abort_after_iterations {
                 conservative_rect.left += delta_nudge_to_dpi_monitor.0;
                 conservative_rect.right += delta_nudge_to_dpi_monitor.0;
                 conservative_rect.top += delta_nudge_to_dpi_monitor.1;
@@ -2147,16 +2147,16 @@ unsafe fn public_window_callback_inner<T: 'static>(
 
             // keep a 1px for taskbar auto-hide to work
             if has_edge(ABE_BOTTOM) {
-              rect.bottom -= 1;
+              rect.bottom -= 1i32;
             }
             if has_edge(ABE_LEFT) {
-              rect.left += 1;
+              rect.left += 1i32;
             }
             if has_edge(ABE_TOP) {
-              rect.top += 1;
+              rect.top += 1i32;
             }
             if has_edge(ABE_RIGHT) {
-              rect.right -= 1;
+              rect.right -= 1i32;
             }
 
             params.rgrc[0] = rect;
@@ -2199,9 +2199,9 @@ unsafe fn public_window_callback_inner<T: 'static>(
           let rect = util::client_rect(window);
           let mut cursor_pt = POINT { x: cx, y: cy };
           if ScreenToClient(window, &mut cursor_pt).as_bool()
-            && cursor_pt.y >= 0
+            && cursor_pt.y >= 0i32
             && cursor_pt.y <= border_y
-            && cursor_pt.x >= 0
+            && cursor_pt.x >= 0i32
             && cursor_pt.x <= rect.right
           {
             result = ProcResult::Value(LRESULT(HTTOP as _));
@@ -2475,21 +2475,21 @@ unsafe fn handle_raw_input<T: 'static>(
       let x = mouse.lLastX as f64;
       let y = mouse.lLastY as f64;
 
-      if x != 0.0 {
+      if x != 0.0f64 {
         subclass_input.send_event(Event::DeviceEvent {
           device_id,
           event: Motion { axis: 0, value: x },
         });
       }
 
-      if y != 0.0 {
+      if y != 0.0f64 {
         subclass_input.send_event(Event::DeviceEvent {
           device_id,
           event: Motion { axis: 1, value: y },
         });
       }
 
-      if x != 0.0 || y != 0.0 {
+      if x != 0.0f64 || y != 0.0f64 {
         subclass_input.send_event(Event::DeviceEvent {
           device_id,
           event: MouseMotion { delta: (x, y) },

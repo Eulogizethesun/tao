@@ -15,7 +15,7 @@ fn main() {
   let event_loop = EventLoop::new();
 
   let mut windows = HashMap::new();
-  for _ in 0..3 {
+  for _ in 0i32..3i32 {
     let window = Window::new(&event_loop).unwrap();
     windows.insert(window.id(), window);
   }

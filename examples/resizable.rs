@@ -19,7 +19,7 @@ fn main() {
 
   let window = WindowBuilder::new()
     .with_title("Hit space to toggle resizability.")
-    .with_inner_size(LogicalSize::new(400.0, 200.0))
+    .with_inner_size(LogicalSize::new(400.0f64, 200.0f64))
     .with_resizable(resizable)
     .build(&event_loop)
     .unwrap();

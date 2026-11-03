@@ -25,9 +25,9 @@ fn main() {
   let num = num.trim().parse().ok().expect("Please enter a number");
 
   let fullscreen = Some(match num {
-    1 => Fullscreen::Exclusive(prompt_for_video_mode(&prompt_for_monitor(&event_loop))),
-    2 => Fullscreen::Borderless(Some(prompt_for_monitor(&event_loop))),
-    3 => Fullscreen::Borderless(None),
+    1i32 => Fullscreen::Exclusive(prompt_for_video_mode(&prompt_for_monitor(&event_loop))),
+    2i32 => Fullscreen::Borderless(Some(prompt_for_monitor(&event_loop))),
+    3i32 => Fullscreen::Borderless(None),
     _ => panic!("Please enter a valid number"),
   });
 

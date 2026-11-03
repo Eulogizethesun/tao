@@ -47,16 +47,25 @@ pub trait WindowExtOpenHarmony {
   /// Returns the OS-level window ID, used to distinguish main (0) vs sub-windows.
   fn window_id(&self) -> Option<i64>;
 
+  /// Returns the resolved OHOS window kind (issue Eulogizethesun/tauri#238):
+  /// `UIAbility` for UIAbility-container windows (the bootstrap main window
+  /// and spawned UIAbility instances), `SubWindow` for sub-windows created
+  /// via `windowStage.createSubWindow` (issue Eulogizethesun/tauri#240).
+  /// Consumed by the embedding runtime (tauri-runtime-wry) to capture
+  /// `is_ui_ability_main` and gate UIAbility-kind-window operations (the
+  /// bootstrap main window and spawned instances) at the dispatcher layer.
+  fn window_kind(&self) -> OHOSWindowKind;
+
   /// Returns the `BridgeRuntime` for constructing bridge-based facade clients
   /// (e.g. wry's `WebviewClient::from_bridge`).
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime;
 
-  /// Destroys the OS-level window: Float sub-windows call `destroyWindow`;
+  /// Destroys the OS-level window: SubWindow sub-windows call `destroyWindow`;
   /// the main (UIAbility) window is system-managed — in-app destroys are
   /// rejected by the bridge for window id 0.
   ///
   /// Fire-and-forget — the bridge call is spawned on the window's bridge
-  /// executor. Recursion-safe against the Float close flow: the synthesized
+  /// executor. Recursion-safe against the sub-window close flow: the synthesized
   /// `CloseRequested` this eventually triggers finds the runtime-side book
   /// already cleaned up.
   fn close(&self);
@@ -73,6 +82,10 @@ impl WindowExtOpenHarmony for Window {
 
   fn window_id(&self) -> Option<i64> {
     self.window.window_id()
+  }
+
+  fn window_kind(&self) -> OHOSWindowKind {
+    self.window.kind()
   }
 
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime {
@@ -99,10 +112,18 @@ pub trait WindowBuilderExtOpenHarmony {
 
   /// Sets the OHOS window kind.
   ///
-  /// - `UIAbility`: Main window that reuses the existing UIAbility container. Only one can exist (singleton).
-  /// - `Float`: Sub-window that creates a new OS-level floating window (TYPE_FLOAT).
+  /// - `UIAbility`: a window backed by its own UIAbility instance. The FIRST
+  ///   window of the process must be this kind (it bootstraps the
+  ///   EntryAbility container; a SubWindow has nothing to attach to);
+  ///   subsequent windows may opt in explicitly and take the
+  ///   spawned-instance path.
+  /// - `SubWindow`: Sub-window created via `windowStage.createSubWindow`, living
+  ///   inside the existing UIAbility container -- not the OS-wide floating window
+  ///   type (`WindowType.TYPE_FLOAT`), a conflation the former `Float` variant
+  ///   name wrongly suggested (issue Eulogizethesun/tauri#240).
   ///
-  /// Default is `Float` when not specified. Use `UIAbility` for the main window.
+  /// Default when not specified (PR#28 review T28-8): the first window is
+  /// `UIAbility` (bootstrap requirement), any later window is `SubWindow`.
   fn with_window_kind(self, kind: OHOSWindowKind) -> Self;
 
   /// Returns the current OHOS window kind, if set.
