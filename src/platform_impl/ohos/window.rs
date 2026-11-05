@@ -198,6 +198,34 @@ pub(crate) static WINDOW_MIRRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mu
 // domain, because the same handler writes several of these statics per call
 // (handle_gained_focus stores the focus trio AND clears the modifiers).
 
+/// Design D2 confirmation channel (a): destroy requests this process issued
+/// through [`Window::close`] whose bridge `destroy-window` resolved Ok
+/// (including the idempotent already-gone ack). The `run_loop` dispatch drains
+/// the queue and synthesizes `Event::WindowEvent::Destroyed`, giving the
+/// embedding runtime a deterministic destruction confirmation even when the
+/// ArkTS notifyWindowClose loopback (channel (b)) cannot fire -- e.g. a window
+/// already destroyed on the ArkTS side has no fresh `aboutToDisappear`.
+/// Belt-and-suspenders next to (b): the downstream executor is idempotent, so
+/// a double confirmation is absorbed. Enqueue happens on the bridge executor
+/// thread; the drain runs on the main thread -- hence the mutex.
+pub(crate) static DESTROY_CONFIRMATIONS: std::sync::LazyLock<std::sync::Mutex<Vec<i64>>> =
+  std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+pub(crate) fn enqueue_destroy_confirmation(window_id: i64) {
+  DESTROY_CONFIRMATIONS
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+    .push(window_id);
+}
+
+pub(crate) fn drain_destroy_confirmations() -> Vec<i64> {
+  std::mem::take(
+    &mut *DESTROY_CONFIRMATIONS
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner()),
+  )
+}
+
 /// Writes the per-window focused bit (#173) through [`WINDOW_MIRRORS`].
 /// A miss (unknown id, or the mirror already unregistered because the
 /// `Window` was dropped) is silently skipped -- same tolerance as the
@@ -751,10 +779,11 @@ struct CreationAttrPlan {
 /// (PR#28 review T28-5, unified `windowId === 0` criterion; gate F1 extended
 /// the seed to sub-windows, so a sub-window created resizable(false) rides
 /// BOTH the decoration-flags leg and the drag leg -- same shape as the
-/// runtime setter). Runtime setters on UIAbility-kind windows error
-/// out, so the set_maximized(true) FLAG_MAXIMIZABLE guard
-/// always passes there -- "always maximizable" is the disclosed consistent
-/// reading (D7).
+/// runtime setter). Only the three button setters (set_minimizable /
+/// set_maximizable / set_closable) error out on UIAbility-kind windows
+/// (set_resizable does not -- it rides the set_resize_by_drag leg above),
+/// so the set_maximized(true) FLAG_MAXIMIZABLE guard always passes there --
+/// "always maximizable" is the disclosed consistent reading (D7).
 fn creation_attr_plan(
   attrs: &window::WindowAttributes,
   is_ui_ability_window: bool,
@@ -1874,18 +1903,33 @@ impl Window {
   /// this is a rejected fire-and-forget (logged as a warning) — the ability
   /// is terminated by the system, not by an in-app close. Fire-and-forget
   /// through the bridge executor, same as the other async window operations.
+  ///
+  /// On a successful resolve the window id is enqueued as a destruction
+  /// confirmation and the event loop is woken so the `run_loop` dispatch
+  /// synthesizes `Event::WindowEvent::Destroyed` (design D2 channel (a)) --
+  /// the deterministic confirmation for the embedding runtime's
+  /// confirmation-driven accounting, covering the paths where the ArkTS
+  /// notifyWindowClose loopback cannot fire. A failed resolve stays silent
+  /// (design D3: failure = no event, the caller keeps its accounting).
   pub fn close(&self) {
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("close") else {
         return;
       };
+      let app = self.app.clone();
       self.spawn_or_queue(async move {
-        if let Err(e) = client.destroy_window(window_id).await {
-          log::warn!(
-            "close: destroy_window failed for window {}: {:?}",
-            window_id,
-            e
-          );
+        match client.destroy_window(window_id).await {
+          Ok(()) => {
+            enqueue_destroy_confirmation(window_id);
+            app.create_waker().wake();
+          }
+          Err(e) => {
+            log::warn!(
+              "close: destroy_window failed for window {}: {:?}",
+              window_id,
+              e
+            );
+          }
         }
       });
     }

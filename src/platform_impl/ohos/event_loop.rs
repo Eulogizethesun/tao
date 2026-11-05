@@ -23,7 +23,9 @@ use crate::window::{self, Theme};
 
 use super::keycodes::{to_location, to_logical, to_physical};
 use super::monitor::MonitorHandle;
-use super::window::{drain_ready_pending_window_ops, WindowId, WINDOW_MIRRORS};
+use super::window::{
+  drain_destroy_confirmations, drain_ready_pending_window_ops, WindowId, WINDOW_MIRRORS,
+};
 
 pub(crate) static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
 
@@ -1016,6 +1018,23 @@ impl<T: 'static> EventLoop<T> {
           event::Event::WindowEvent {
             window_id: window::WindowId(WindowId(ohos_win_id as i64)),
             event: event::WindowEvent::CloseRequested,
+          }
+        );
+      }
+      // Design D2 confirmation channel (a): destroy requests issued through
+      // `Window::close` that resolved Ok (including the idempotent
+      // already-gone ack) come back here as synthesized Destroyed events, so
+      // the embedding runtime's confirmation executor also runs for paths
+      // where the notifyWindowClose loopback above cannot fire (window
+      // already destroyed -> no fresh aboutToDisappear). Idempotent
+      // downstream: a loopback CloseRequested for the same window is absorbed
+      // by the executor's remove-or-early-exit.
+      for confirmed_id in drain_destroy_confirmations() {
+        call_event_handler!(
+          event_loop_cell,
+          event::Event::WindowEvent {
+            window_id: window::WindowId(WindowId(confirmed_id)),
+            event: event::WindowEvent::Destroyed,
           }
         );
       }
