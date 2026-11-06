@@ -104,9 +104,9 @@ fn main() {
                 "m" => window.set_maximized(state),
                 "p" => window.set_outer_position({
                   let mut position = window.outer_position().unwrap();
-                  let sign = if state { 1 } else { -1 };
-                  position.x += 10 * sign;
-                  position.y += 10 * sign;
+                  let sign = if state { 1i32 } else { -1i32 };
+                  position.x += 10i32 * sign;
+                  position.y += 10i32 * sign;
                   position
                 }),
                 "q" => window.request_redraw(),
@@ -119,8 +119,8 @@ fn main() {
                   if let Size::Physical(size) = WINDOW_SIZE.into() {
                     window
                       .set_cursor_position(Position::Physical(PhysicalPosition::new(
-                        size.width as i32 / 2,
-                        size.height as i32 / 2,
+                        size.width as i32 / 2i32,
+                        size.height as i32 / 2i32,
                       )))
                       .unwrap()
                   }

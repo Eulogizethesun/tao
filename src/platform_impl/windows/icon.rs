@@ -76,7 +76,7 @@ impl WinIcon {
     let wide_path = util::encode_wide(path.as_ref());
 
     // width / height of 0 along with LR_DEFAULTSIZE tells windows to load the default icon size
-    let (width, height) = size.map(Into::into).unwrap_or((0, 0));
+    let (width, height) = size.map(Into::into).unwrap_or((0i32, 0i32));
 
     let handle = unsafe {
       LoadImageW(
@@ -94,7 +94,7 @@ impl WinIcon {
 
   pub fn from_resource(resource_id: u16, size: Option<PhysicalSize<u32>>) -> Result<Self, BadIcon> {
     // width / height of 0 along with LR_DEFAULTSIZE tells windows to load the default icon size
-    let (width, height) = size.map(Into::into).unwrap_or((0, 0));
+    let (width, height) = size.map(Into::into).unwrap_or((0i32, 0i32));
     let handle = unsafe {
       LoadImageW(
         GetModuleHandleW(PCWSTR::null()).map(Into::into).ok(),

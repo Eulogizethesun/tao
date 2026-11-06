@@ -1,3 +1,7 @@
+//! Procedural macros for the tao windowing library: `android_fn!` for
+//! generating Android JNI entry points and `generate_package_name!` for
+//! embedding the package name at compile time.
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{

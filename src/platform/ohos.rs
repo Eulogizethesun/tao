@@ -6,8 +6,25 @@
 //! for defining the main entry point for your Rust application as well as tracking
 //! various life-cycle events and synchronizing with the main thread.
 //!
-//! Winit uses the [openharmony-ability](https://docs.rs/openharmony-ability/) as a
+//! tao uses the [openharmony-ability](https://docs.rs/openharmony-ability/) as a
 //! glue crate.
+//!
+//! ## Event loop semantics
+//!
+//! OHOS is callback-driven: the main thread must be handed back to ArkTS, so
+//! [`EventLoop::run`] registers the event handler and **returns immediately**
+//! — it does not block until the app exits like on desktop platforms. Events
+//! are dispatched from ArkTS lifecycle callbacks afterwards.
+//!
+//! Consequences for [`ControlFlow`](crate::event_loop::ControlFlow):
+//!
+//! - Setting `ControlFlow::Exit` from the handler terminates the UIAbility at
+//!   the end of the current event dispatch (it does not make `run` return —
+//!   `run` has already returned).
+//! - `EventLoopExtRunReturn` is not implemented on OHOS (the same as on iOS):
+//!   a "run until exit, then give the caller back control" loop cannot exist
+//!   when the main thread belongs to ArkTS. Runtimes alias `run_return` to
+//!   `run` on OHOS.
 //!
 
 #![cfg(target_env = "ohos")]
@@ -30,17 +47,28 @@ pub trait WindowExtOpenHarmony {
   /// Returns the OS-level window ID, used to distinguish main (0) vs sub-windows.
   fn window_id(&self) -> Option<i64>;
 
+  /// Returns the resolved OHOS window kind (issue Eulogizethesun/tauri#238):
+  /// `UIAbility` for UIAbility-container windows (the bootstrap main window
+  /// and spawned UIAbility instances), `SubWindow` for sub-windows created
+  /// via `windowStage.createSubWindow` (issue Eulogizethesun/tauri#240).
+  /// Consumed by the embedding runtime (tauri-runtime-wry) to capture
+  /// `is_ui_ability_main` and gate UIAbility-kind-window operations (the
+  /// bootstrap main window and spawned instances) at the dispatcher layer.
+  fn window_kind(&self) -> OHOSWindowKind;
+
   /// Returns the `BridgeRuntime` for constructing bridge-based facade clients
   /// (e.g. wry's `WebviewClient::from_bridge`).
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime;
 
-  /// Backfills system window status into tao mirror bits (issue 5, 5.3).
+  /// Destroys the OS-level window: SubWindow sub-windows call `destroyWindow`;
+  /// the main (UIAbility) window is system-managed — in-app destroys are
+  /// rejected by the bridge for window id 0.
   ///
-  /// `status` is a raw OHOS `WindowStatusType` value (passed through from ArkTS
-  /// `windowStatusChange`). Called by tauri-runtime-wry's OHOS drain block after
-  /// routing to this window, updating the `visible`/`fullscreen` mirror bits to
-  /// reflect system truth.
-  fn apply_window_status(&self, status: i32);
+  /// Fire-and-forget — the bridge call is spawned on the window's bridge
+  /// executor. Recursion-safe against the sub-window close flow: the synthesized
+  /// `CloseRequested` this eventually triggers finds the runtime-side book
+  /// already cleaned up.
+  fn close(&self);
 }
 
 impl WindowExtOpenHarmony for Window {
@@ -56,6 +84,10 @@ impl WindowExtOpenHarmony for Window {
     self.window.window_id()
   }
 
+  fn window_kind(&self) -> OHOSWindowKind {
+    self.window.kind()
+  }
+
   fn bridge_runtime(&self) -> openharmony_ability::BridgeRuntime {
     self
       .window
@@ -63,8 +95,8 @@ impl WindowExtOpenHarmony for Window {
       .expect("BridgeRuntime not available — EventLoop not initialized")
   }
 
-  fn apply_window_status(&self, status: i32) {
-    self.window.apply_window_status(status);
+  fn close(&self) {
+    self.window.close();
   }
 }
 
@@ -80,10 +112,18 @@ pub trait WindowBuilderExtOpenHarmony {
 
   /// Sets the OHOS window kind.
   ///
-  /// - `UIAbility`: Main window that reuses the existing UIAbility container. Only one can exist (singleton).
-  /// - `Float`: Sub-window that creates a new OS-level floating window (TYPE_FLOAT).
+  /// - `UIAbility`: a window backed by its own UIAbility instance. The FIRST
+  ///   window of the process must be this kind (it bootstraps the
+  ///   EntryAbility container; a SubWindow has nothing to attach to);
+  ///   subsequent windows may opt in explicitly and take the
+  ///   spawned-instance path.
+  /// - `SubWindow`: Sub-window created via `windowStage.createSubWindow`, living
+  ///   inside the existing UIAbility container -- not the OS-wide floating window
+  ///   type (`WindowType.TYPE_FLOAT`), a conflation the former `Float` variant
+  ///   name wrongly suggested (issue Eulogizethesun/tauri#240).
   ///
-  /// Default is `Float` when not specified. Use `UIAbility` for the main window.
+  /// Default when not specified (PR#28 review T28-8): the first window is
+  /// `UIAbility` (bootstrap requirement), any later window is `SubWindow`.
   fn with_window_kind(self, kind: OHOSWindowKind) -> Self;
 
   /// Returns the current OHOS window kind, if set.
@@ -124,9 +164,9 @@ impl<T> EventLoopBuilderExtOpenHarmony for EventLoopBuilder<T> {
 
 /// Re-export of the `openharmony-ability` API
 ///
-/// Winit re-exports the `openharmony-ability` API for convenience so that most
-/// applications can rely on the Winit crate to resolve the required version of
-/// `openharmony-ability` and avoid any chance of a conflict between Winit and the
+/// tao re-exports the `openharmony-ability` API for convenience so that most
+/// applications can rely on the tao crate to resolve the required version of
+/// `openharmony-ability` and avoid any chance of a conflict between tao and the
 /// application crate.
 ///
 ///
@@ -135,7 +175,7 @@ impl<T> EventLoopBuilderExtOpenHarmony for EventLoopBuilder<T> {
 /// implement entry like:
 /// ```rust
 /// #[cfg(target_env = "ohos")]
-/// use winit::platform::ohos::ability::OpenHarmonyApp;
+/// use tao::platform::ohos::ability::OpenHarmonyApp;
 /// use openharmony_ability_derive::ability;
 ///
 /// #[ability]
@@ -145,7 +185,9 @@ impl<T> EventLoopBuilderExtOpenHarmony for EventLoopBuilder<T> {
 /// ```
 pub mod ability {
   #[doc(no_inline)]
-  pub use openharmony_ability::{OpenHarmonyApp, drain_pending_window_closes, drain_pending_window_status};
+  pub use openharmony_ability::{
+    drain_pending_window_closes, drain_pending_window_status, OpenHarmonyApp,
+  };
 
   #[doc(no_inline)]
   pub use openharmony_ability_derive::*;
