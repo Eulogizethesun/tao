@@ -1295,7 +1295,7 @@ impl<T: 'static> EventLoop<T> {
           Self::apply_blur(&event_loop_cell, window_id);
           LAST_FOCUSED_WINDOW_ID.store(0, Ordering::Relaxed);
         }
-        MainEvent::ConfigChanged { .. } => {
+        MainEvent::ConfigChanged(config) => {
           // Configuration changes are app-level (EnvironmentCallback), not tied to a
           // specific window. Broadcast to every live window like ThemeChanged
           // below (scale is app-global on OHOS; WINDOW_MIRRORS covers main +
@@ -1312,12 +1312,46 @@ impl<T: 'static> EventLoop<T> {
           // content rect then (the same pre-geometry degradation the Resized
           // path tolerates).
           // #180 (design D8): the broadcast is edge-guarded -- a bitwise-equal
-          // scale repeat (ConfigChanged storms that leave scale untouched)
-          // forwards nothing, first event forwards (0-bits reads as
-          // unseeded). Mirrors the ThemeChanged guard below; the two edge
+          // repeat (ConfigChanged storms that leave the effective scale
+          // untouched) forwards nothing, first event forwards (0-bits reads
+          // as unseeded). Mirrors the ThemeChanged guard below; the two edge
           // detectors are independent.
-          let scale = app.scale();
-          if scale_should_forward(scale as f64) {
+          //
+          // S1-061 fix wave (config-driven edge + composite payload): the
+          // pre-fix guard keyed on `app.scale()` alone -- the live NDK
+          // `GetDefaultDisplayScaledDensity` display value -- which no
+          // user-reachable setting moves (round-4..7 device evidence: the
+          // `显示大小` setting changes VPR only; the `字体大小` setting
+          // changes this event's Configuration only), so the guard swallowed
+          // every real change and `onScaleChanged` never fired. The edge key
+          // and the payload are now the composite
+          // `app.scale() * config.font_size_scale`: the density leg keeps
+          // the original payload source, the font-scale leg reads the
+          // ARRIVED Configuration (not re-queried), so font-size changes
+          // forward. Divergence disclosed: `Window::scale_factor()` keeps
+          // returning the bare display density (upstream tao contract keeps
+          // font size out of scale_factor, and flipping the getter would
+          // couple every LogicalSize conversion to the font setting), so
+          // the event reports the composite while later reads report the
+          // density. Still not covered (remains disclosed): `显示大小` /
+          // VPR changes forward nothing -- neither leg moves. The debug
+          // line below is the fix-wave probe: one line per dispatched
+          // ConfigChanged carrying both legs plus the decision,
+          // separating the "NDK source value never moves" / "NAPI
+          // callback never arrived" hypotheses the round-7 zero-probe
+          // could not.
+          let font_scale = config.font_size_scale;
+          let density = app.scale() as f64;
+          let composite = density * font_scale;
+          let forward = scale_should_forward(composite);
+          debug!(
+            "ConfigChanged: font_size_scale={}, app.scale()={}, composite={}, forward={}",
+            font_scale,
+            density,
+            composite,
+            forward
+          );
+          if forward {
             let app_rect = app.content_rect();
             for wid in live_window_ids() {
               let inner = app.inner_rect_for(wid);
@@ -1333,7 +1367,7 @@ impl<T: 'static> EventLoop<T> {
                   window_id: window::WindowId(WindowId(wid)),
                   event: event::WindowEvent::ScaleFactorChanged {
                     new_inner_size: &mut size,
-                    scale_factor: scale as _,
+                    scale_factor: composite,
                   },
                 }
               );
