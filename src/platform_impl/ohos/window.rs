@@ -578,6 +578,16 @@ pub(crate) struct Window {
   min_inner_height: AtomicU32,
   max_inner_width: AtomicU32,
   max_inner_height: AtomicU32,
+  /// Title cache: the `title()` read-back for the `set_title` intent.
+  /// OHOS has no synchronous title query (the ArkTS LocalStorage 'title'
+  /// slot is write-only from tao), so the getter reads this app-owned cache
+  /// — the same "app-owned local mirror" family as `decorations`. NOT
+  /// seeded from the builder title: creation never displays it on OHOS
+  /// (it only serves as the sub-window label fallback), so a seeded cache
+  /// would report a title the title bar never showed. None until the first
+  /// `set_title` → `title()` returns the empty string (pre-fix behavior
+  /// for unset windows).
+  title: std::sync::Mutex<Option<String>>,
 }
 
 /// OHOS `WindowStatusType` (API 11+) — the system's window mode, reported via
@@ -1138,6 +1148,7 @@ impl Window {
       min_inner_height: AtomicU32::new(constraint_px(constraints.min_height)),
       max_inner_width: AtomicU32::new(constraint_px(constraints.max_width)),
       max_inner_height: AtomicU32::new(constraint_px(constraints.max_height)),
+      title: std::sync::Mutex::new(None),
     };
 
     // Register the state mirror so the event loop drain can apply
@@ -1715,6 +1726,10 @@ impl Window {
     // OHOS setWindowTitle (API 15, Promise form). Main window + sub-windows
     // both support title text. Only visible when decorations enabled (decorEnabled=true).
     // Icon is NOT changeable at runtime.
+    // Cache the intent for `title()`: even when the dispatch below fails, the
+    // cache reflects what the app last asked for (app-owned intent mirror,
+    // same family as the decorations bit).
+    *self.title.lock().expect("title cache poisoned") = Some(title.to_string());
     if let Some(window_id) = self.window_id {
       let Some(client) = self.bridge_client("set_title") else {
         return;
@@ -2719,7 +2734,14 @@ impl Window {
   }
 
   pub fn title(&self) -> String {
-    String::new()
+    // Cache-on-set read-back: OHOS has no synchronous title query. The cache
+    // carries the last set_title intent; None until the first set returns the
+    // empty string (the pre-fix return for never-titled windows).
+    self.title
+      .lock()
+      .expect("title cache poisoned")
+      .clone()
+      .unwrap_or_default()
   }
 
   #[cfg(feature = "rwh_04")]
